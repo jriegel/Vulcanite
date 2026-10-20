@@ -1,0 +1,15 @@
+{
+  "name": "vulcanite",
+  "version-string": "0.0.0",
+  "dependencies": [
+    "openmesh",
+    "metis",
+    "assimp",
+    "vulkan",
+    {
+      "name": "glslang",
+      "host": true,
+      "features": ["tools"]
+    }
+  ]
+}

@@ -37,7 +37,14 @@ function(buildExample EXAMPLE_NAME SPIRV_DEPENDENCIES)
 	if(WIN32)
 		add_executable(${EXAMPLE_NAME} WIN32 ${MAIN_CPP} ${SOURCE} ${MAIN_HEADER} ${SHADERS_GLSL} ${SHADERS_HLSL} ${README_FILES})
 		find_package(openmesh REQUIRED)
-		target_link_libraries(${EXAMPLE_NAME} base mesh ${Vulkan_LIBRARY} ${WINLIBS} ${OPENMESH_LIBRARIES})
+		target_link_libraries(${EXAMPLE_NAME}
+  base
+  mesh
+  ${Vulkan_LIBRARY}
+  ${WINLIBS}
+  OpenMeshCore
+  OpenMeshTools
+)
 		foreach(SHADER_SOURCE ${SHADERS_GLSL})
 		
 		get_filename_component(fname ${SHADER_SOURCE} NAME)
@@ -49,7 +56,7 @@ function(buildExample EXAMPLE_NAME SPIRV_DEPENDENCIES)
 		add_custom_command(
 		OUTPUT ${SPIRV_OUTPUT}
 		COMMAND ${CMAKE_COMMAND} -E make_directory ${shader_dir}
-		COMMAND $ENV{VK_SDK_PATH}/Bin/glslangValidator.exe -V ${SHADER_SOURCE} -o ${SPIRV_OUTPUT} -g
+		COMMAND "${GLSLANG_VALIDATOR}" -V ${SHADER_SOURCE} -o ${SPIRV_OUTPUT} -g
 		DEPENDS ${SHADER_SOURCE}
 		COMMENT "Compiling ${SHADER_SOURCE} to SPIR-V"
 		)
@@ -138,7 +145,7 @@ function(compileBaseShaders)
 		add_custom_command(
 		OUTPUT ${SPIRV_OUTPUT}
 		COMMAND ${CMAKE_COMMAND} -E make_directory ${shader_dir}
-		COMMAND $ENV{VK_SDK_PATH}/Bin/glslangValidator.exe -V ${SHADER_SOURCE} -o ${SPIRV_OUTPUT} -g
+		COMMAND "${GLSLANG_VALIDATOR}" -V ${SHADER_SOURCE} -o ${SPIRV_OUTPUT} -g
 		DEPENDS ${SHADER_SOURCE}
 		COMMENT "Compiling ${SHADER_SOURCE} to SPIR-V"
 		)
@@ -150,6 +157,18 @@ function(compileBaseShaders)
 
 endfunction(compileBaseShaders)
 
+
+find_program(GLSLANG_VALIDATOR
+  NAMES glslangValidator glslangValidator.exe
+  HINTS
+    "$ENV{VULKAN_SDK}/Bin"
+    "$ENV{VK_SDK_PATH}/Bin"
+		"${VCPKG_INSTALLED_DIR}/${VCPKG_HOST_TRIPLET}/tools/glslang"
+)
+
+if(NOT GLSLANG_VALIDATOR)
+	message(FATAL_ERROR "glslangValidator not found. Install the vcpkg manifest dependencies, install the Vulkan SDK and set VULKAN_SDK, or set GLSLANG_VALIDATOR to the executable path.")
+endif()
 
 compileBaseShaders()
 buildExamples()
