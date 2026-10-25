@@ -8,6 +8,9 @@
 
 #include "vulkanexamplebase.h"
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include <stb/stb_image_write.h>
+
 #if (defined(VK_USE_PLATFORM_MACOS_MVK) && defined(VK_EXAMPLE_XCODE_GENERATED))
 #include <Cocoa/Cocoa.h>
 #include <QuartzCore/CAMetalLayer.h>
@@ -215,7 +218,7 @@ void VulkanExampleBase::prepare()
 	setupRenderPass();
 	createPipelineCache();
 	setupFrameBuffer();
-	settings.overlay = settings.overlay && (!benchmark.active);
+	settings.overlay = settings.overlay && (!benchmark.active) && (!capture.active);
 	if (settings.overlay) {
 		UIOverlay.device = vulkanDevice;
 		UIOverlay.queue = queue;
@@ -253,7 +256,15 @@ void VulkanExampleBase::nextFrame()
 		viewChanged();
 	}
 
+	if (capture.active)
+	{
+		capture.pending = (capture.framesRendered + 1 >= capture.frames);
+	}
 	render();
+	if (capture.active)
+	{
+		capture.framesRendered++;
+	}
 	frameCounter++;
 	auto tEnd = std::chrono::high_resolution_clock::now();
 #if (defined(VK_USE_PLATFORM_IOS_MVK) || (defined(VK_USE_PLATFORM_MACOS_MVK) && !defined(VK_EXAMPLE_XCODE_GENERATED)))
@@ -339,6 +350,9 @@ void VulkanExampleBase::renderLoop()
 		}
 		if (prepared && !IsIconic(window)) {
 			nextFrame();
+			if (capture.done) {
+				quitMessageReceived = true;
+			}
 		}
 	}
 #elif defined(VK_USE_PLATFORM_ANDROID_KHR)
@@ -766,6 +780,16 @@ void VulkanExampleBase::prepareFrame()
 
 void VulkanExampleBase::submitFrame()
 {
+	if (capture.pending)
+	{
+		// The frame has been submitted but not presented yet, so the image is still ours to read back
+		VK_CHECK_RESULT(vkQueueWaitIdle(queue));
+		if (!saveSwapchainImage(capture.filename)) {
+			exitCode = 1;
+		}
+		capture.pending = false;
+		capture.done = true;
+	}
 	VkResult result = swapChain.queuePresent(queue, currentBuffer, semaphores.renderComplete);
 	// Recreate the swapchain if it's no longer compatible with the surface (OUT_OF_DATE) or no longer optimal for presentation (SUBOPTIMAL)
 	if ((result == VK_ERROR_OUT_OF_DATE_KHR) || (result == VK_SUBOPTIMAL_KHR)) {
@@ -780,10 +804,77 @@ void VulkanExampleBase::submitFrame()
 	VK_CHECK_RESULT(vkQueueWaitIdle(queue));
 }
 
+bool VulkanExampleBase::saveSwapchainImage(const std::string& filename)
+{
+	const VkFormat format = swapChain.colorFormat;
+	const bool bgr = (format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB);
+	const bool rgb = (format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB);
+	if (!bgr && !rgb) {
+		std::cerr << "Frame capture: unsupported swapchain format " << format << std::endl;
+		return false;
+	}
+
+	const VkDeviceSize bufferSize = static_cast<VkDeviceSize>(width) * height * 4;
+	VkBuffer buffer;
+	VkDeviceMemory memory;
+	VK_CHECK_RESULT(vulkanDevice->createBuffer(
+		VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		bufferSize, &buffer, &memory));
+
+	VkCommandBuffer cmd = vulkanDevice->createCommandBuffer(VK_COMMAND_BUFFER_LEVEL_PRIMARY, true);
+	VkImage image = swapChain.images[currentBuffer];
+
+	VkImageMemoryBarrier barrier = vks::initializers::imageMemoryBarrier();
+	barrier.image = image;
+	barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+	barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+	barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+	VkBufferImageCopy region = {};
+	region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+	region.imageExtent = { width, height, 1 };
+	vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &region);
+
+	barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+	barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+	vulkanDevice->flushCommandBuffer(cmd, queue, true);
+
+	uint8_t* data = nullptr;
+	VK_CHECK_RESULT(vkMapMemory(device, memory, 0, bufferSize, 0, reinterpret_cast<void**>(&data)));
+	std::vector<uint8_t> pixels(data, data + bufferSize);
+	vkUnmapMemory(device, memory);
+	vkDestroyBuffer(device, buffer, nullptr);
+	vkFreeMemory(device, memory, nullptr);
+
+	// PNG is RGBA and must be opaque so that the alpha channel never influences comparisons
+	for (size_t i = 0; i < pixels.size(); i += 4) {
+		if (bgr) {
+			std::swap(pixels[i], pixels[i + 2]);
+		}
+		pixels[i + 3] = 255;
+	}
+
+	if (!stbi_write_png(filename.c_str(), width, height, 4, pixels.data(), width * 4)) {
+		std::cerr << "Frame capture: could not write " << filename << std::endl;
+		return false;
+	}
+	std::cout << "Frame capture: wrote " << filename << " (" << width << "x" << height << ")" << std::endl;
+	return true;
+}
+
 VulkanExampleBase::VulkanExampleBase(bool enableValidation)
 {
 #if !defined(VK_USE_PLATFORM_ANDROID_KHR)
-	// Check for a valid asset path
 	struct stat info;
 	if (stat(getAssetPath().c_str(), &info) != 0)
 	{
@@ -815,6 +906,8 @@ VulkanExampleBase::VulkanExampleBase(bool enableValidation)
 	commandLineParser.add("benchmarkresultfile", { "-bf", "--benchfilename" }, 1, "Set file name for benchmark results");
 	commandLineParser.add("benchmarkresultframes", { "-bt", "--benchframetimes" }, 0, "Save frame times to benchmark results file");
 	commandLineParser.add("benchmarkframes", { "-bfs", "--benchmarkframes" }, 1, "Only render the given number of frames");
+	commandLineParser.add("capture", { "--capture" }, 1, "Render a fixed number of frames, save the last one as PNG and quit");
+	commandLineParser.add("captureframes", { "--captureframes" }, 1, "Number of frames to render before capturing (default 10)");
 
 	commandLineParser.parse(args);
 	if (commandLineParser.isSet("help")) {
@@ -868,6 +961,12 @@ VulkanExampleBase::VulkanExampleBase(bool enableValidation)
 	if (commandLineParser.isSet("benchmarkframes")) {
 		benchmark.outputFrames = commandLineParser.getValueAsInt("benchmarkframes", benchmark.outputFrames);
 	}
+	if (commandLineParser.isSet("capture")) {
+		capture.active = true;
+		std::cout << std::unitbuf;
+		capture.filename = commandLineParser.getValueAsString("capture", "capture.png");
+		capture.frames = std::max(1, commandLineParser.getValueAsInt("captureframes", 10));
+	}
 
 #if defined(VK_USE_PLATFORM_ANDROID_KHR)
 	// Vulkan library is loaded dynamically on Android
@@ -883,7 +982,7 @@ VulkanExampleBase::VulkanExampleBase(bool enableValidation)
 
 #if defined(_WIN32)
 	// Enable console if validation is active, debug message callback will output to it
-	if (this->settings.validation)
+	if (this->settings.validation && !capture.active)
 	{
 		setupConsole("Vulkan example");
 	}

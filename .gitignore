@@ -241,3 +241,7 @@ build.bat
 
 # nanite caches
 **/*_naniteCache/**
+
+# Generated nanite caches and test output
+*_naniteCache/
+tests/output/

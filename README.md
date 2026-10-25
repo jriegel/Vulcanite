@@ -263,3 +263,13 @@ Mesh decimation is not robust enough. For now, it only accepts mesh whose faces 
 
 - [GAMES104_Lecture22.pdf (myqcloud.com)](https://games-1312234642.cos.ap-guangzhou.myqcloud.com/course/GAMES104/GAMES104_Lecture22.pdf)
 
+
+## Tests
+
+Render regression tests run the whole pipeline (glTF -> Nanite build -> render -> PNG) and compare against golden images in tests/golden.
+
+    cmake --build build --config Release
+    cd build; ctest -C Release --output-on-failure
+
+Notes: use Release (Debug is far too slow for the Nanite build). METIS is fetched via FetchContent on first configure (needs git/network). Needs a Vulkan GPU. To refresh the golden image set VULCANITE_UPDATE_GOLDEN=1 when running ctest. Capture manually: pbrtexture --capture out.png --model bunny [--captureframes N].
+

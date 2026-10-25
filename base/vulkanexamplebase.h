@@ -169,6 +169,22 @@ public:
 
 	vks::Benchmark benchmark;
 
+	/**
+	 * @brief Automated frame capture used by the regression tests (--capture <file.png> [--captureframes N]).
+	 * Renders `frames` frames, writes the last rendered frame to `filename` and quits with `exitCode` set.
+	 */
+	struct Capture {
+		bool active = false;
+		std::string filename;
+		uint32_t frames = 10;
+		uint32_t framesRendered = 0;
+		bool pending = false;
+		bool done = false;
+	} capture;
+
+	/** @brief Process exit code, non-zero if an automated run (e.g. frame capture) failed */
+	int exitCode = 0;
+
 	/** @brief Encapsulated physical and logical vulkan device */
 	vks::VulkanDevice *vulkanDevice;
 
@@ -398,6 +414,8 @@ public:
 	void prepareFrame();
 	/** @brief Presents the current image to the swap chain */
 	void submitFrame();
+	/** @brief Reads back the current (already rendered) swap chain image and writes it as PNG */
+	bool saveSwapchainImage(const std::string& filename);
 	/** @brief (Virtual) Default image acquire + submission and command buffer submission function */
 	virtual void renderFrame();
 
@@ -430,9 +448,12 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)									\
 	vulkanExample->setupWindow(hInstance, WndProc);													\
 	vulkanExample->prepare();																		\
 	vulkanExample->renderLoop();																	\
+	int exitCode = vulkanExample->exitCode;															\
+	bool automated = vulkanExample->capture.active;													\
+	if (automated) { std::cout.flush(); std::_Exit(exitCode); }										\
 	delete(vulkanExample);																			\
-	system("pause");																				\
-	return 0;																						\
+	if (!automated) { system("pause"); }															\
+	return exitCode;																				\
 }
 #elif defined(VK_USE_PLATFORM_ANDROID_KHR)
 // Android entry point

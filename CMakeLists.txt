@@ -150,6 +150,11 @@ ENDIF(WIN32)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/")
 
+include(FetchMetis)
+
 add_subdirectory(base)
 add_subdirectory(examples)
 add_subdirectory(mesh)
+
+enable_testing()
+add_subdirectory(tests)

@@ -269,9 +269,12 @@ public:
 	int topViewWidth = width / 5, topViewHeight = height / 5;
 
 	bool vis_topView = false;
-
+	std::string modelName = "dragon";
 	VulkanExample() : VulkanExampleBase(ENABLE_VALIDATION)
 	{
+		commandLineParser.add("model", { "--model" }, 1, "Model name under assets/models to nanite-ify (default dragon)");
+		commandLineParser.parse(args);
+		modelName = commandLineParser.getValueAsString("model", "dragon");
 		title = "Vulkanite: A dynamic LOD rendering pipeline";
 
 		camera.type = Camera::CameraType::firstperson;
@@ -1137,11 +1140,10 @@ public:
 		models.skybox.loadFromFile(getAssetPath() + "models/cube.gltf", vulkanDevice, queue, glTFLoadingFlags);
 		//models.object.loadFromFile(getAssetPath() + "models/cerberus/cerberus.gltf", vulkanDevice, queue, glTFLoadingFlags);
 		//reducedModel.generateClusterInfos(models.object, vulkanDevice, queue);
-		
-		models.object.loadFromFile(getAssetPath() + "models/dragon.gltf", vulkanDevice, queue, glTFLoadingFlags);
-		naniteMesh.setModelPath((getAssetPath() + "models/dragon/").c_str());
+		models.object.loadFromFile(getAssetPath() + "models/" + modelName + ".gltf", vulkanDevice, queue, glTFLoadingFlags);
+		naniteMesh.setModelPath((getAssetPath() + "models/" + modelName + "/").c_str());
 		naniteMesh.loadvkglTFModel(models.object);
-		naniteMesh.initNaniteInfo(getAssetPath() + "models/dragon.gltf", true);
+		naniteMesh.initNaniteInfo(getAssetPath() + "models/" + modelName + ".gltf", true);
 
 		for (int i = 0; i < naniteMesh.meshes.size(); i++)
 		{

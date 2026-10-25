@@ -35,7 +35,6 @@ source_group(Sources FILES ${sources})
 
 #include_directories(external/OpenMesh/src)
 #include_directories(external/metis/include)
-find_package(metis CONFIG REQUIRED)
 find_package(OpenMesh REQUIRED)
 find_package(assimp CONFIG REQUIRED)
 
@@ -55,5 +54,5 @@ target_include_directories(${APPLICATION_NAME} PRIVATE ${OPENMESH_INCLUDE_DIRS})
 target_link_libraries(${APPLICATION_NAME} 
 PRIVATE assimp::assimp
   ${OPENMESH_LIBRARIES}
-  metis
+PUBLIC metis
 )
