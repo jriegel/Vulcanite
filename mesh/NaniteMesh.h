@@ -11,6 +11,17 @@
 #include "NaniteBlob.h"
 
 struct NaniteMesh {
+	// The glTF flags every consumer of the builder must use. `vkglTF::Model::loadFromFile`
+	// rewrites `vertexBuffer` in place - `FlipY` negates pos.y/normal.y and
+	// `PreTransformVertices` applies the node hierarchy matrix - and the builder consumes
+		// exactly those vertices, so a loader that uses a different set bakes a mirrored or
+		// misplaced mesh that still passes every blob hash check (the source hash only covers
+		// the file bytes). Both `pbrtexture.cpp` and `tools/nanite_bake` use this constant.
+	static constexpr uint32_t kBuilderLoadingFlags =
+		vkglTF::FileLoadingFlags::PreTransformVertices
+		| vkglTF::FileLoadingFlags::PreMultiplyVertexColors
+		| vkglTF::FileLoadingFlags::FlipY;
+
 	// How the binary blob cache (NaniteBlob.h) is used by `initNaniteInfo`.
 	enum class BlobMode {
 		Auto,    // prefer a blob, else the JSON cache, else build; always bake after a build

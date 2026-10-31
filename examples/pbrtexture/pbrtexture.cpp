@@ -1163,7 +1163,8 @@ public:
 
 	void loadAssets()
 	{
-		const uint32_t glTFLoadingFlags = vkglTF::FileLoadingFlags::PreTransformVertices | vkglTF::FileLoadingFlags::PreMultiplyVertexColors | vkglTF::FileLoadingFlags::FlipY;
+		// Must match the bake tool - see NaniteMesh::kBuilderLoadingFlags.
+		const uint32_t glTFLoadingFlags = NaniteMesh::kBuilderLoadingFlags;
 		models.skybox.loadFromFile(getAssetPath() + "models/cube.gltf", vulkanDevice, queue, glTFLoadingFlags);
 		//models.object.loadFromFile(getAssetPath() + "models/cerberus/cerberus.gltf", vulkanDevice, queue, glTFLoadingFlags);
 		//reducedModel.generateClusterInfos(models.object, vulkanDevice, queue);
@@ -1327,7 +1328,7 @@ public:
 		modelMats = defaultModelMats();
 		vis_clusters_level = 0;
 
-		const uint32_t glTFLoadingFlags = vkglTF::FileLoadingFlags::PreTransformVertices | vkglTF::FileLoadingFlags::PreMultiplyVertexColors | vkglTF::FileLoadingFlags::FlipY;
+		const uint32_t glTFLoadingFlags = NaniteMesh::kBuilderLoadingFlags;
 		// `loadFromFile` appends, so the previous model has to be released first.
 		models.object.clear();
 		models.object.loadFromFile(modelFile, vulkanDevice, queue, glTFLoadingFlags);

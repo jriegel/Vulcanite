@@ -218,18 +218,15 @@ int main(int argc, char** argv)
 		const std::string modelDir = modelFile.substr(0, modelFile.find_last_of("\\/") + 1);
 
 		vkglTF::Model model;
-		// IMPORTANT: these flags must stay identical to the viewer's `glTFLoadingFlags`
-		// (examples/pbrtexture/pbrtexture.cpp). `loadFromFile` rewrites `vertexBuffer` in
-		// place - FlipY negates pos.y/normal.y and PreTransformVertices applies the node
-		// hierarchy matrix - and the builder consumes exactly those vertices, so baking with
-		// a different flag set produces a mirrored/misplaced mesh that still passes every
-		// hash check. Only DontLoadImages is added: the builder never reads a texture and
-		// uploading images would need descriptors the tool does not have.
+		// IMPORTANT: the flags must stay identical to the viewer's - both use
+		// NaniteMesh::kBuilderLoadingFlags, because `loadFromFile` rewrites `vertexBuffer` in
+		// place (FlipY negates pos.y/normal.y, PreTransformVertices applies the node hierarchy
+		// matrix) and the builder consumes exactly those vertices. Baking with a different set
+		// produces a mirrored/misplaced mesh that still passes every hash check.
+		// Only DontLoadImages is added: the builder never reads a texture and uploading images
+		// would need descriptors this tool does not have.
 		const uint32_t glTFLoadingFlags =
-			vkglTF::FileLoadingFlags::PreTransformVertices
-			| vkglTF::FileLoadingFlags::PreMultiplyVertexColors
-			| vkglTF::FileLoadingFlags::FlipY
-			| vkglTF::FileLoadingFlags::DontLoadImages;
+			NaniteMesh::kBuilderLoadingFlags | vkglTF::FileLoadingFlags::DontLoadImages;
 		model.loadFromFile(modelFile, headless.device, headless.transferQueue, glTFLoadingFlags);
 
 		NaniteMesh naniteMesh;
