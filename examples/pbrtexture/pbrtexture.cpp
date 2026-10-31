@@ -17,6 +17,7 @@
 #include "Instance.h"
 #include "NaniteScene.h"
 #include "VulkanDescriptorSetManager.h"
+#include "FileDialog.h"
 
 #define ENABLE_VALIDATION true
 
@@ -272,12 +273,26 @@ public:
 	std::string modelName = "dragon";
 	// How the binary nanite blob cache is used (see mesh/NaniteBlob.h).
 	NaniteMesh::BlobMode naniteBlobMode = NaniteMesh::BlobMode::Auto;
+	// Set by the UI button / KEY_O. The dialog is *not* opened from OnUpdateUIOverlay: the ImGui
+	// frame is open there and a blocking modal would re-enter the renderer. It is consumed at the
+	// top of render() instead, outside of any command buffer or ImGui frame.
+	bool openDialogRequested = false;
+	// `NaniteMesh::setModelPath` stores a raw const char*, so the string must outlive the call.
+	std::string naniteModelDir;
+	// --reload <file> runs `reloadModel` after `reloadAtFrame` frames. The file dialog is modal and
+	// cannot be driven from a test, so this is what makes the reload path regression testable.
+	std::string reloadModelPath;
+	int reloadAtFrame = 10;
+	bool reloadDone = false;
+	uint32_t framesRendered = 0;
 	VulkanExample() : VulkanExampleBase(ENABLE_VALIDATION)
 	{
 		commandLineParser.add("model", { "--model" }, 1, "Model name under assets/models to nanite-ify (default dragon)");
 		commandLineParser.add("nanite-blob", { "--nanite-blob" }, false, "Load the nanite data only from the binary blob cache; fail if it is missing or stale");
 		commandLineParser.add("nanite-json", { "--nanite-json" }, false, "Use the legacy JSON nanite cache; never read or write the binary blob cache");
 		commandLineParser.add("nanite-rebuild", { "--nanite-rebuild" }, false, "Ignore every nanite cache and rebuild, then re-bake the blob cache");
+		commandLineParser.add("reload", { "--reload" }, 1, "Full path of a model to load at runtime, i.e. what the file dialog would deliver (exercises the reload path)");
+		commandLineParser.add("reloadframe", { "--reloadframe" }, 1, "Frame at which --reload is applied (default 10)");
 		commandLineParser.parse(args);
 		modelName = commandLineParser.getValueAsString("model", "dragon");
 		if (commandLineParser.isSet("nanite-blob")) {
@@ -289,6 +304,8 @@ public:
 		else if (commandLineParser.isSet("nanite-rebuild")) {
 			naniteBlobMode = NaniteMesh::BlobMode::Rebuild;
 		}
+		reloadModelPath = commandLineParser.getValueAsString("reload", "");
+		reloadAtFrame = std::max(1, commandLineParser.getValueAsInt("reloadframe", 10));
 		title = "Vulkanite: A dynamic LOD rendering pipeline";
 
 		camera.type = Camera::CameraType::firstperson;
@@ -1155,7 +1172,9 @@ public:
 		//models.object.loadFromFile(getAssetPath() + "models/cerberus/cerberus.gltf", vulkanDevice, queue, glTFLoadingFlags);
 		//reducedModel.generateClusterInfos(models.object, vulkanDevice, queue);
 		models.object.loadFromFile(getAssetPath() + "models/" + modelName + ".gltf", vulkanDevice, queue, glTFLoadingFlags);
-		naniteMesh.setModelPath((getAssetPath() + "models/" + modelName + "/").c_str());
+		// `setModelPath` keeps the pointer, so it must not come from a temporary.
+		naniteModelDir = getAssetPath() + "models/" + modelName + "/";
+		naniteMesh.setModelPath(naniteModelDir.c_str());
 		naniteMesh.loadvkglTFModel(models.object);
 		naniteMesh.initNaniteInfo(getAssetPath() + "models/" + modelName + ".gltf", true, naniteBlobMode);
 
@@ -1183,7 +1202,189 @@ public:
 		models.cube.loadFromFile(getAssetPath() + "models/cube.gltf", vulkanDevice, queue, glTFLoadingFlags);
 	}
 
-	void setupDescriptors()
+	/*
+	* Frees a raw (VkBuffer/VkDeviceMemory) vertex or index buffer.
+	* The structs are zero initialized, so "never created" and "already freed" are the same state.
+	*/
+	void freeVkBuffers(vkglTF::Model::Vertices& v)
+	{
+		if (v.buffer != VK_NULL_HANDLE) {
+			vkDestroyBuffer(device, v.buffer, nullptr);
+		}
+		if (v.memory != VK_NULL_HANDLE) {
+			vkFreeMemory(device, v.memory, nullptr);
+		}
+		v = {};
+	}
+
+	void freeVkBuffers(vkglTF::Model::Indices& v)
+	{
+		if (v.buffer != VK_NULL_HANDLE) {
+			vkDestroyBuffer(device, v.buffer, nullptr);
+		}
+		if (v.memory != VK_NULL_HANDLE) {
+			vkFreeMemory(device, v.memory, nullptr);
+		}
+		v = {};
+	}
+
+	/*
+	* Frees a vks::Buffer. `destroy()` is deliberately *not* used: most of these were created
+	* through the raw `createBuffer` overload, which never fills in `Buffer::device`, so calling
+	* `destroy()` on them would pass an uninitialized VkDevice to vkDestroyBuffer.
+	* `destroy()` also leaves the handles dangling, hence the reset to {}.
+	*/
+	void freeBuffer(vks::Buffer& buffer)
+	{
+		if (buffer.buffer != VK_NULL_HANDLE) {
+			vkDestroyBuffer(device, buffer.buffer, nullptr);
+		}
+		if (buffer.memory != VK_NULL_HANDLE) {
+			vkFreeMemory(device, buffer.memory, nullptr);
+		}
+		buffer = {};
+	}
+
+	/*
+	* Releases everything a model reload has to recreate. Sized from the nanite data, so the
+	* sizes change with the model and the old allocations cannot simply be reused.
+	*/
+	void freeNaniteBuffers()
+	{
+		freeVkBuffers(scene.vertices);
+		freeVkBuffers(scene.indices);
+
+		freeBuffer(bvhNodeInfosBuffer);
+		freeBuffer(initNodeInfosBuffer);
+		freeBuffer(currNodeInfosBuffer);
+		freeBuffer(nextNodeInfosBuffer);
+		freeBuffer(sortedClusterIndicesBuffer);
+		freeBuffer(culledClusterIndicesBuffer);
+		freeBuffer(culledClusterObjectIndicesBuffer);
+		freeBuffer(HWRIndicesBuffer);
+		freeBuffer(HWRIDBuffer);
+		freeBuffer(SWRIndicesBuffer);
+		freeBuffer(SWRIDBuffer);
+		freeBuffer(clustersInfoBuffer);
+		freeBuffer(errorInfoBuffer);
+		freeBuffer(projectedErrorBuffer);
+		freeBuffer(modelMatsBuffer);
+		freeBuffer(cullingUniformBuffer);
+		freeBuffer(errorUniformBuffer);
+		freeBuffer(hwrDrawIndexedIndirectBuffer);
+		freeBuffer(swrIndirectDispatchBuffer);
+		freeBuffer(swrNumVerticesBuffer);
+	}
+
+	/*
+	* The per-LOD vertex buffers `loadAssets` creates through `Mesh::createVertexBuffer`.
+	* Those are raw VkBuffers owned by the mesh and nothing else releases them.
+	*/
+	void freeNaniteMeshBuffers(NaniteMesh& mesh)
+	{
+		for (auto& meshLOD : mesh.meshes) {
+			freeVkBuffers(meshLOD.vertices);
+			freeVkBuffers(meshLOD.uniqueVertices);
+			freeVkBuffers(meshLOD.sortedIndices);
+		}
+	}
+
+	/*
+	* Swaps the nanite-ified model at runtime - this is what the file dialog feeds.
+	*
+	* Everything that is *sized* from the model has to go: the scene vertex/index buffers, the
+	* BVH traversal, culling and error projection buffers, and the descriptor writes pointing at
+	* them. Everything that is model independent (render passes, HiZ, rasterization images, the
+	* environment cube, the pipelines and the descriptor *layouts*) is kept, which is why this
+	* calls `writeDescriptors()` but never `setupDescriptorLayouts()`.
+	*/
+	void reloadModel(const std::string& modelFile)
+	{
+		if (!prepared) {
+			return;
+		}
+
+		// Nothing may still be in flight: command buffers reference the buffers freed below.
+		VK_CHECK_RESULT(vkDeviceWaitIdle(device));
+		prepared = false;
+
+		std::error_code ec;
+		if (!std::filesystem::exists(modelFile, ec)) {
+			std::cerr << "[reload] no such file: " << modelFile << std::endl;
+			prepared = true;
+			return;
+		}
+
+		freeNaniteBuffers();
+		freeNaniteMeshBuffers(naniteMesh);
+
+		// The scene owns copies of the meshes and its buffers are already gone, so start from
+		// scratch instead of leaving the previous generation behind.
+		scene = NaniteScene();
+		clusterinfos.clear();
+		errorinfos.clear();
+		naniteMesh = NaniteMesh();
+		modelMats = defaultModelMats();
+		vis_clusters_level = 0;
+
+		const uint32_t glTFLoadingFlags = vkglTF::FileLoadingFlags::PreTransformVertices | vkglTF::FileLoadingFlags::PreMultiplyVertexColors | vkglTF::FileLoadingFlags::FlipY;
+		// `loadFromFile` appends, so the previous model has to be released first.
+		models.object.clear();
+		models.object.loadFromFile(modelFile, vulkanDevice, queue, glTFLoadingFlags);
+
+		// `setModelPath` only stores the pointer, so the string has to outlive the call.
+		naniteModelDir = modelFile.substr(0, modelFile.find_last_of("\\/") + 1);
+		naniteMesh.setModelPath(naniteModelDir.c_str());
+		naniteMesh.loadvkglTFModel(models.object);
+		naniteMesh.initNaniteInfo(modelFile, true, naniteBlobMode);
+
+		for (size_t i = 0; i < naniteMesh.meshes.size(); i++)
+		{
+			naniteMesh.meshes[i].initUniqueVertexBuffer();
+			naniteMesh.meshes[i].initVertexBuffer();
+			naniteMesh.meshes[i].createVertexBuffer(vulkanDevice, queue);
+		}
+		scene.naniteMeshes.emplace_back(naniteMesh);
+
+		createScene2();
+		scene.createNaniteSceneInfo(vulkanDevice, queue);
+
+		// Same order as `prepare()`, minus the one-time / model independent steps.
+		createBVHTraversalBuffers();
+		createCullingBuffers();
+		createErrorProjectionBuffer();
+		createModelMatsBuffer();
+
+		writeDescriptors();
+
+		title = "Vulcanite: " + std::filesystem::path(modelFile).filename().string();
+		updateUniformBuffers();
+		updateParams();
+		buildCommandBuffers();
+		prepared = true;
+
+		std::cout << "[reload] " << modelFile << " - " << scene.sceneIndicesCount / 3
+			<< " triangles, " << clusterinfos.size() << " clusters, " << naniteMesh.lodNums
+			<< " LODs" << std::endl;
+	}
+
+	static std::vector<glm::mat4> defaultModelMats()
+	{
+		return {
+			glm::rotate(glm::translate(glm::mat4(1.0f), glm::vec3(0, 0, 3)), glm::radians(-90.0f), glm::vec3(0.0f, 1.0f, 0.0f)),
+			glm::mat4(1.0f),
+			glm::translate(glm::mat4(1.0f), glm::vec3(2.0f, 0.0f, 0.0f)),
+			glm::mat4(1.0f),
+			glm::translate(glm::mat4(1.0f), glm::vec3(2.0f, 0.0f, 0.0f)),
+		};
+	}
+
+	/*
+	* Descriptor *layouts* are created exactly once. `addSetLayout` throws on a duplicate name and
+	* `createLayoutsAndSets` early-returns once the layouts exist, so a model reload must never
+	* come back through here - it only calls `writeDescriptors()` again.
+	*/
+	void setupDescriptorLayouts()
 	{
 		
 		auto manager = VulkanDescriptorSetManager::getManager();
@@ -1312,6 +1513,16 @@ public:
 		manager->addSetLayout("shading", setLayoutBindings, 1);
 
 		manager->createLayoutsAndSets(device);
+	}
+
+	/*
+	* Points the (already created) descriptor sets at the current buffers. Safe to call repeatedly,
+	* which is what a model reload needs: the sets themselves are reused, only the buffer handles
+	* behind a few bindings change.
+	*/
+	void writeDescriptors()
+	{
+		auto manager = VulkanDescriptorSetManager::getManager();
 
 
 		//culledObjectIndicesBuffer.setupDescriptor();
@@ -3921,20 +4132,83 @@ public:
 		createModelMatsBuffer();
 		createHWRasterizeFramebuffer();
 		prepareUniformBuffers();
-		setupDescriptors();
+		setupDescriptorLayouts();
+		writeDescriptors();
 		preparePipelines();
 		buildCommandBuffers();
 		prepared = true;
 	}
 
+	void requestModelDialog()
+	{
+		openDialogRequested = true;
+	}
+
+	/*
+	* Non interactive counterpart of the file dialog: `--reload <file>` feeds the same
+	* `reloadModel` entry point, so the tests can verify that swapping the model at runtime keeps
+	* every descriptor, buffer and command buffer consistent.
+	*/
+	void handlePendingCommandLineReload()
+	{
+		if (reloadModelPath.empty() || reloadDone || framesRendered < static_cast<uint32_t>(reloadAtFrame)) {
+			return;
+		}
+		reloadDone = true;
+		try {
+			reloadModel(reloadModelPath);
+		}
+		catch (const std::exception& e) {
+			std::cerr << "[reload] failed: " << e.what() << std::endl;
+		}
+	}
+
+	/*
+	* Opens the native file picker *outside* the ImGui frame and hands the picked path to
+	* `reloadModel`. Doing this here rather than in OnUpdateUIOverlay keeps the blocking dialog
+	* away from an open ImGui frame and from a command buffer that is being recorded.
+	*/
+	void handlePendingModelDialog()
+	{
+		if (!openDialogRequested) {
+			return;
+		}
+		openDialogRequested = false;
+
+		std::string picked;
+		const std::vector<vks::FileFilter> filters = {
+			{ "glTF models", "*.gltf *.glb" },
+			{ "All files", "*.*" },
+		};
+		if (!vks::openFileDialog(picked, "Load glTF model", filters, getAssetPath() + "models")) {
+			return;
+		}
+		try {
+			reloadModel(picked);
+		}
+		catch (const std::exception& e) {
+			std::cerr << "[reload] failed: " << e.what() << std::endl;
+		}
+	}
+
 	virtual void render()
 	{
+		handlePendingModelDialog();
+		handlePendingCommandLineReload();
 		if (!prepared)
 			return;
 		draw();
 		if (camera.updated)
 		{
 			updateUniformBuffers();
+		}
+		framesRendered++;
+	}
+
+	virtual void keyPressed(uint32_t key) override
+	{
+		if (key == KEY_O) {
+			requestModelDialog();
 		}
 	}
 
@@ -3988,6 +4262,11 @@ public:
 			{
 				rebuildCB = true;
 			}
+			// Deferred: the dialog is modal and must not be opened while the ImGui frame is open.
+			if (overlay->button("Load model...")) {
+				requestModelDialog();
+			}
+			overlay->text("or press O");
 		}
 		if (rebuildCB)
 		{

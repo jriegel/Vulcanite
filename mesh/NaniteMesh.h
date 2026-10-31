@@ -56,7 +56,9 @@ struct NaniteMesh {
 	void buildClusterInfo();
 
 	/************ Serialization *************/
-	void serialize(const std::string& filepath);
+	// Returns false if the cache could not be written (read-only target directory, disk full,
+	// ...). Caching is optional, so callers must be able to continue without it.
+	bool serialize(const std::string& filepath);
 	void deserialize(const std::string& filepath);
 
 	/************ Binary asset cache (asset pipeline -> viewer) *************/

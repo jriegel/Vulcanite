@@ -721,6 +721,57 @@ void vkglTF::Model::createEmptyTexture(VkQueue transferQueue)
 /*
 	glTF model loading and rendering class
 */
+void vkglTF::Model::clear()
+{
+	// A model that was never loaded has no device at all, and `loadFromFile` may have failed
+	// before any buffer was created - both cases are a no-op.
+	if (device == nullptr) {
+		return;
+	}
+	if (vertices.buffer != VK_NULL_HANDLE) {
+		vkDestroyBuffer(device->logicalDevice, vertices.buffer, nullptr);
+	}
+	if (vertices.memory != VK_NULL_HANDLE) {
+		vkFreeMemory(device->logicalDevice, vertices.memory, nullptr);
+	}
+	if (indices.buffer != VK_NULL_HANDLE) {
+		vkDestroyBuffer(device->logicalDevice, indices.buffer, nullptr);
+	}
+	if (indices.memory != VK_NULL_HANDLE) {
+		vkFreeMemory(device->logicalDevice, indices.memory, nullptr);
+	}
+	vertices = {};
+	indices = {};
+	for (auto texture : textures) {
+		texture.destroy();
+	}
+	for (auto node : nodes) {
+		delete node;
+	}
+	for (auto skin : skins) {
+		delete skin;
+	}
+	// The node/material descriptor layouts are process wide globals (vkglTF::descriptorSetLayoutUbo
+	// and vkglTF::descriptorSetLayoutImage). Destroying them here would invalidate the descriptor
+	// sets of every *other* model that is still in use, so they are left alone and reused.
+	vkDestroyDescriptorPool(device->logicalDevice, descriptorPool, nullptr);
+	descriptorPool = VK_NULL_HANDLE;
+	emptyTexture.destroy();
+
+	// Everything loadFromFile appends to or derives from
+	indexBuffer.clear();
+	vertexBuffer.clear();
+	nodes.clear();
+	linearNodes.clear();
+	skins.clear();
+	textures.clear();
+	materials.clear();
+	animations.clear();
+	buffersBound = false;
+	path.clear();
+	dimensions = {};
+}
+
 vkglTF::Model::~Model()
 {
 	vkDestroyBuffer(device->logicalDevice, vertices.buffer, nullptr);
@@ -1171,7 +1222,9 @@ void vkglTF::Model::loadFromFile(std::string filename, vks::VulkanDevice *device
 	// We let tinygltf handle this, by passing the asset manager of our app
 	tinygltf::asset_manager = androidApp->activity->assetManager;
 #endif
-	size_t pos = filename.find_last_of('/');
+	// Both separators: the viewer's file dialog hands out Windows paths with backslashes, and
+	// `path` is what external image URIs are resolved against.
+	size_t pos = filename.find_last_of("/\\");
 	path = filename.substr(0, pos);
 
 	std::string error, warning;

@@ -256,15 +256,18 @@ namespace vkglTF
 		vks::VulkanDevice* device;
 		VkDescriptorPool descriptorPool;
 
+		// Zero initialized: several owners (Mesh, Instance, NaniteScene, NaniteMesh) keep these
+		// inline and only ever assign them, so a reload path needs to be able to ask whether a
+		// buffer actually exists before destroying it.
 		struct Vertices {
-			int count;
-			VkBuffer buffer;
-			VkDeviceMemory memory;
+			int count = 0;
+			VkBuffer buffer = VK_NULL_HANDLE;
+			VkDeviceMemory memory = VK_NULL_HANDLE;
 		} vertices;
 		struct Indices {
-			int count;
-			VkBuffer buffer;
-			VkDeviceMemory memory;
+			int count = 0;
+			VkBuffer buffer = VK_NULL_HANDLE;
+			VkDeviceMemory memory = VK_NULL_HANDLE;
 		} indices;
 
 		std::vector<uint32_t> indexBuffer;
@@ -293,6 +296,12 @@ namespace vkglTF
 
 		Model() {};
 		~Model();
+		/**
+		* @brief Releases every Vulkan resource owned by this model and resets it to a fresh state
+		* @note `loadFromFile` appends to `indexBuffer`/`vertexBuffer` and creates new buffers, so it
+		*       must never be called twice on the same model without calling `clear()` first
+		*/
+		void clear();
 		void loadNode(vkglTF::Node* parent, const tinygltf::Node& node, uint32_t nodeIndex, const tinygltf::Model& model, std::vector<uint32_t>& indexBuffer, std::vector<Vertex>& vertexBuffer, float globalscale);
 		void loadSkins(tinygltf::Model& gltfModel);
 		void loadImages(tinygltf::Model& gltfModel, vks::VulkanDevice* device, VkQueue transferQueue);

@@ -320,20 +320,18 @@ void NaniteMesh::generateNaniteInfo() {
 	//}
 }
 
-void NaniteMesh::serialize(const std::string& filepath)
+bool NaniteMesh::serialize(const std::string& filepath)
 {
 	std::filesystem::path directoryPath(filepath);
 
-	try {
-		if (std::filesystem::create_directory(directoryPath)) {
-			std::cout << "Directory created successfully." << std::endl;
-		}
-		else {
-			std::cout << "Failed to create directory or it already exists. Dir:" << filepath << std::endl;
-		}
-	}
-	catch (const std::filesystem::filesystem_error& e) {
-		ASSERT(0, "Error creating directory");
+	// Caching is an optimization, not a requirement: a model picked from a read-only or
+	// network folder has to keep working, it just gets rebuilt on the next run.
+	std::error_code ec;
+	std::filesystem::create_directories(directoryPath, ec);
+	if (ec) {
+		std::cerr << "[cache] cannot create " << filepath << ": " << ec.message()
+			<< " - continuing without a cache" << std::endl;
+		return false;
 	}
 
 	for (size_t i = 0; i < meshes.size(); i++)
@@ -362,13 +360,19 @@ void NaniteMesh::serialize(const std::string& filepath)
 
 	// Save the JSON data to a file
 	std::ofstream file(std::string(filepath) + "nanite_info.json");
-	if (file.is_open()) {
-		file << result.dump(2); // Pretty-print with an indentation of 2 spaces
-		file.close();
+	if (!file.is_open()) {
+		std::cerr << "[cache] cannot write " << filepath << "nanite_info.json"
+			<< " - continuing without a cache" << std::endl;
+		return false;
 	}
-	else {
-		ASSERT(0, "Error opening file for serialization");
+	file << result.dump(2); // Pretty-print with an indentation of 2 spaces
+	file.close();
+	if (!file.good()) {
+		std::cerr << "[cache] write error for " << filepath << "nanite_info.json"
+			<< " - continuing without a cache" << std::endl;
+		return false;
 	}
+	return true;
 }
 
 void NaniteMesh::deserialize(const std::string & filepath)
@@ -439,11 +443,16 @@ void NaniteMesh::deserialize(const std::string & filepath)
 
 std::string NaniteMesh::cachePathFor(const std::string& filepath)
 {
-	if (filepath.find_last_of(".") == std::string::npos) {
+	const size_t dot = filepath.find_last_of(".");
+	if (dot == std::string::npos) {
 		ASSERT(0, "Invalid file path, no ext");
 		return "";
 	}
-	return filepath.substr(0, filepath.find_last_of('.')) + "_naniteCache\\";
+	// `<model>_naniteCache` next to the source mesh. The trailing separator comes from
+	// std::filesystem so the result stays valid on POSIX hosts instead of hardcoding `\\`.
+	std::filesystem::path cachePath(filepath.substr(0, dot) + "_naniteCache");
+	cachePath += std::filesystem::path::preferred_separator;
+	return cachePath.string();
 }
 
 std::string NaniteMesh::blobPathFor(const std::string& filepath)
@@ -601,12 +610,14 @@ void NaniteMesh::initNaniteInfo(const std::string & filepath, bool useCache, Blo
 	if (!hasInitialized) {
 		std::cerr << "Start building..." << std::endl;
 		generateNaniteInfo();
-		serialize(cachePath);
-		std::cout << cachePath << "nanite_info.json" << " generated" << std::endl;
+		const bool cached = serialize(cachePath);
+		if (cached) {
+			std::cout << cachePath << "nanite_info.json" << " generated" << std::endl;
+		}
 
 		// 3. Bake the binary cache for the next run. The current run keeps using the
 		//    freshly built in-memory state, so the two paths stay cross-checked.
-		if (blobMode != BlobMode::JsonOnly) {
+		if (cached && blobMode != BlobMode::JsonOnly) {
 			for (size_t i = 0; i < meshes.size(); i++) {
 				meshes[i].initUniqueVertexBuffer();
 			}
