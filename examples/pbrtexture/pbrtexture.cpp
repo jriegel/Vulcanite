@@ -1122,8 +1122,6 @@ public:
 		for (int i = 0; i < naniteMesh2.meshes.size(); i++)
 		{
 			naniteMesh2.meshes[i].initUniqueVertexBuffer();
-			naniteMesh2.meshes[i].initVertexBuffer();
-			naniteMesh2.meshes[i].createVertexBuffer(vulkanDevice, queue);
 		}
 		scene.naniteMeshes.push_back(naniteMesh2);
 		auto& instance2 = Instance(&naniteMesh2, modelMats[1]);
@@ -1140,8 +1138,6 @@ public:
 		for (int i = 0; i < naniteMesh2.meshes.size(); i++)
 		{
 			naniteMesh2.meshes[i].initUniqueVertexBuffer();
-			naniteMesh2.meshes[i].initVertexBuffer();
-			naniteMesh2.meshes[i].createVertexBuffer(vulkanDevice, queue);
 		}
 		scene.naniteMeshes.push_back(naniteMesh2);
 		
@@ -1180,11 +1176,13 @@ public:
 
 		// With a blob the per-LOD OpenMesh meshes are never created, so the vertex buffers
 		// below stay empty and the scene is uploaded from the baked payloads instead.
+		// Only the *unique* per-LOD vertices are needed: `Instance::initBufferForNaniteLODs`
+		// copies them into the scene vertex buffer. The per-cluster, per-cluster-colored
+		// debug mesh (`initVertexBuffer`/`createVertexBuffer`) is only bound by the
+		// commented-out `Mesh::draw` calls in `draw()`, so it is not built here.
 		for (int i = 0; i < naniteMesh.meshes.size(); i++)
 		{
 			naniteMesh.meshes[i].initUniqueVertexBuffer();
-			naniteMesh.meshes[i].initVertexBuffer();
-			naniteMesh.meshes[i].createVertexBuffer(vulkanDevice, queue);
 		}
 		scene.naniteMeshes.emplace_back(naniteMesh);
 		
@@ -1277,8 +1275,10 @@ public:
 	}
 
 	/*
-	* The per-LOD vertex buffers `loadAssets` creates through `Mesh::createVertexBuffer`.
-	* Those are raw VkBuffers owned by the mesh and nothing else releases them.
+	* The per-LOD buffers owned by `Mesh`. They are raw VkBuffers created through the
+	* `createBuffer(VkBuffer*, VkDeviceMemory*)` overload and nothing else releases them, so a
+	* reload has to. `vertices`/`sortedIndices` stay empty in the normal render path (see the
+	* comment in `loadAssets`) and are skipped by `freeVkBuffers` in that case.
 	*/
 	void freeNaniteMeshBuffers(NaniteMesh& mesh)
 	{
@@ -1341,8 +1341,6 @@ public:
 		for (size_t i = 0; i < naniteMesh.meshes.size(); i++)
 		{
 			naniteMesh.meshes[i].initUniqueVertexBuffer();
-			naniteMesh.meshes[i].initVertexBuffer();
-			naniteMesh.meshes[i].createVertexBuffer(vulkanDevice, queue);
 		}
 		scene.naniteMeshes.emplace_back(naniteMesh);
 
