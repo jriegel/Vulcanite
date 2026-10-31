@@ -1,4 +1,5 @@
 #include "MeshHandler.h"
+#include "MetisGraph.h"
 #include <algorithm>
 #include <unordered_set>
 #include <unordered_map>

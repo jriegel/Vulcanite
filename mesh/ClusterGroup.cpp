@@ -1,4 +1,5 @@
 #include "ClusterGroup.h"
+#include "MetisGraph.h"
 
 void ClusterGroup::buildTriangleIndicesLocalGlobalMapping()
 {

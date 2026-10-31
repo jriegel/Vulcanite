@@ -1,4 +1,5 @@
 #include "Mesh.h"
+#include "MetisGraph.h"
 
 void Mesh::assignTriangleClusterGroup(Mesh& lastLOD)
 {

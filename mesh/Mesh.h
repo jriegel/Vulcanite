@@ -19,6 +19,7 @@
 
 #include "Common.h"
 #include "Graph.h"
+#include "IndexTypes.h"
 #include "Cluster.h"
 #include "ClusterGroup.h"
 #include "NaniteBVH.h"
@@ -64,14 +65,14 @@ public:
 	Graph triangleGraph;
 	int clusterNum;
 	const int targetClusterSize = CLUSTER_TARGET_SIZE;
-	std::vector<idx_t> triangleClusterIndex;
+	std::vector<metis_idx_t> triangleClusterIndex;
 	std::unordered_map<int, int> clusterColorAssignment;
 	std::vector<Cluster> clusters;
 
 	Graph clusterGraph;
 	int clusterGroupNum;
 	const int targetClusterGroupSize = CLUSTER_GROUP_TARGET_SIZE;
-	std::vector<idx_t> clusterGroupIndex;
+	std::vector<metis_idx_t> clusterGroupIndex;
 	std::unordered_map<int, int> clusterGroupColorAssignment;
 	std::vector<ClusterGroup> clusterGroups;
 

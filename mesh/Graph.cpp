@@ -1,14 +1,4 @@
-#include "Graph.h"
+// `Graph` is all inline. Its METIS adapter moved to MetisGraph.{h,cpp} so that
+// `metis.h` is not pulled into every translation unit that includes Mesh.h.
+// This file is intentionally empty and is scheduled for removal.
 
-void toMetisGraph(const Graph& graph, MetisGraph& metisGraph)
-{
-	metisGraph.nvtxs = graph.adjList.size();
-    for (auto& tosAndCosts : graph.adjList) {
-        metisGraph.xadj.push_back(metisGraph.adjncy.size());
-        for (const auto & toAndCost : tosAndCosts) {
-            metisGraph.adjncy.push_back(toAndCost.first);
-            metisGraph.adjwgt.push_back(toAndCost.second);
-        }
-    }
-    metisGraph.xadj.push_back(metisGraph.adjncy.size());
-}

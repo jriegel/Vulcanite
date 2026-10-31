@@ -2,17 +2,19 @@ set(headers
     "Cluster.h"
     "ClusterGroup.h"
     "Common.h"
+    "Config.h"
     "GpuTypes.h"
+    "Graph.h"
+    "IndexTypes.h"
+    "Instance.h"
     "MeshHandler.h"
     "Mesh.h"
+    "MetisGraph.h"
     "NaniteBlob.h"
+    "NaniteBVH.h"
     "NaniteMesh.h"
     "NaniteScene.h"
-    "NaniteBVH.h"
-    "Graph.h"
     "utils.h"
-    "Config.h"
-    "Instance.h"
 )
 
 set(sources
@@ -20,14 +22,15 @@ set(sources
     "Cluster.cpp"
     "ClusterGroup.cpp"
     "Common.cpp"
+    "Graph.cpp"
+    "Instance.cpp"
     "Mesh.cpp"
     "MeshHandler.cpp"
+    "MetisGraph.cpp"
     "NaniteBlob.cpp"
     "NaniteMesh.cpp"
     "NaniteScene.cpp"
-    "Graph.cpp"
     "utils.cpp"
-    "Instance.cpp"
 )
 
 list(SORT headers)
@@ -54,8 +57,10 @@ file(GLOB MESH_HEADERS ${headers})
 add_library(${APPLICATION_NAME} STATIC ${MESH_SRC})
 
 target_include_directories(${APPLICATION_NAME} PRIVATE ${OPENMESH_INCLUDE_DIRS})
+# metis is PRIVATE: `metis.h` only reaches the builder sources through MetisGraph.h, so the
+# include directory no longer leaks into the examples (it used to come in via Graph.h).
 target_link_libraries(${APPLICATION_NAME} 
 PRIVATE assimp::assimp
   ${OPENMESH_LIBRARIES}
-PUBLIC metis
+  metis
 )

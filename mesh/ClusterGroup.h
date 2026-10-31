@@ -3,6 +3,7 @@
 #include <unordered_set>
 #include "Common.h"
 #include "Graph.h"
+#include "IndexTypes.h"
 #include "utils.h"
 #include "Config.h"
 
@@ -36,9 +37,9 @@ struct ClusterGroup {
 	std::vector<MyMesh::HalfedgeHandle> clusterGroupHalfedges; // Stores all half-edges of clusterGroup in meshLOD N
 	
 	// Local triangle graph partition related
-	std::vector<idx_t> localTriangleClusterIndices; // Stores the local cluster indices of local triangles
+	std::vector<metis_idx_t> localTriangleClusterIndices; // Stores the local cluster indices of local triangles
 	const int targetClusterSize = CLUSTER_TARGET_SIZE;
-	idx_t localClusterNum;
+	metis_idx_t localClusterNum;
 	Graph localTriangleGraph;
 	
 	// Stores a 1-1 mapping between local triangle indices and global triangle indices in meshLOD N

@@ -1,7 +1,14 @@
 #pragma once
 #include <unordered_map>
-#include <metis.h>
+#include <vector>
+#include <cstdint>
 
+/*
+	Plain adjacency map. This used to `#include <metis.h>` and carry the METIS adapter
+	(`MetisGraph`, `toMetisGraph`), which leaked the asset pipeline's third-party include
+	directory into every translation unit that includes Mesh.h - the viewer included. That
+	adapter now lives in MetisGraph.h, which is only included by the builder sources.
+*/
 struct Graph {
     std::vector<std::unordered_map<uint32_t, int>> adjList;
 
@@ -11,12 +18,3 @@ struct Graph {
 
     void addEdgeCost(uint32_t from, uint32_t to, int cost) { adjList[from][to] += cost; };
 };
-
-struct MetisGraph {
-    idx_t nvtxs;
-    std::vector<idx_t> xadj;
-    std::vector<idx_t> adjncy;
-    std::vector<idx_t> adjwgt;
-};
-
-void toMetisGraph(const Graph& graph, MetisGraph& metisGraph);

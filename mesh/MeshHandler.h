@@ -12,7 +12,7 @@
 #include <OpenMesh/Core/Geometry/QuadricT.hh>
 
 #include "Graph.h"
-#include "metis.h"
+#include "IndexTypes.h"
 #include "utils.h"
 #include "Mesh.h"
 
@@ -28,7 +28,7 @@ class MeshHandler {
 	Graph triangleGraph;
 	int clusterNum;
 	const int targetClusterSize = 31;
-	std::vector<idx_t> triangleClusterIndex;
+	std::vector<metis_idx_t> triangleClusterIndex;
 	std::unordered_map<int, int> clusterColorAssignment;
 	const std::vector<glm::vec3> nodeColors =
 	{
@@ -45,7 +45,7 @@ class MeshHandler {
 	Graph clusterGraph;
 	int clusterGroupNum;
 	const int targetClusterGroupSize = 16;
-	std::vector<idx_t> clusterGroupIndex;
+	std::vector<metis_idx_t> clusterGroupIndex;
 	std::unordered_map<int, int> clusterGroupColorAssignment;
 	std::vector<glm::vec3> clusterGroupColor;
 public:
