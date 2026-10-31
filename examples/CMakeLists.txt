@@ -1,5 +1,7 @@
 # Function for building single example
-function(buildExample EXAMPLE_NAME SPIRV_DEPENDENCIES)
+# `USE_MESH_LIB` links the nanite mesh library (and with it OpenMesh) into the example. Only
+# pbrtexture uses it - the other examples must not pick up mesh.lib or the OpenMesh DLLs.
+function(buildExample EXAMPLE_NAME SPIRV_DEPENDENCIES USE_MESH_LIB)
 	SET(EXAMPLE_FOLDER ${CMAKE_CURRENT_SOURCE_DIR}/${EXAMPLE_NAME})
 	message(STATUS "Generating project file for example in ${EXAMPLE_FOLDER}")
 	# Main
@@ -36,15 +38,19 @@ function(buildExample EXAMPLE_NAME SPIRV_DEPENDENCIES)
 
 	if(WIN32)
 		add_executable(${EXAMPLE_NAME} WIN32 ${MAIN_CPP} ${SOURCE} ${MAIN_HEADER} ${SHADERS_GLSL} ${SHADERS_HLSL} ${README_FILES})
-		find_package(openmesh REQUIRED)
 		target_link_libraries(${EXAMPLE_NAME}
   base
-  mesh
   ${Vulkan_LIBRARY}
   ${WINLIBS}
+)
+		if(USE_MESH_LIB)
+			find_package(openmesh REQUIRED)
+			target_link_libraries(${EXAMPLE_NAME}
+  mesh
   OpenMeshCore
   OpenMeshTools
 )
+		endif()
 		foreach(SHADER_SOURCE ${SHADERS_GLSL})
 		
 		get_filename_component(fname ${SHADER_SOURCE} NAME)
@@ -116,7 +122,12 @@ function(buildExamples)
 	
 	foreach(EXAMPLE ${EXAMPLES})
 		set(SPIRV_DEPENDENCIES "")
-		buildExample(${EXAMPLE} SPIRV_DEPENDENCIES)
+		if(EXAMPLE IN_LIST MESH_EXAMPLES)
+			set(use_mesh_lib ON)
+		else()
+			set(use_mesh_lib OFF)
+		endif()
+		buildExample(${EXAMPLE} SPIRV_DEPENDENCIES ${use_mesh_lib})
 		add_custom_target(${EXAMPLE}_shader_spv DEPENDS ${SPIRV_DEPENDENCIES})
 		add_dependencies(${EXAMPLE} ${EXAMPLE}_shader_spv base_shader_spv)
 
@@ -127,6 +138,11 @@ endfunction(buildExamples)
 
 set(EXAMPLES
 	pbribl
+	pbrtexture
+)
+
+# Examples that need the nanite mesh library (and therefore OpenMesh).
+set(MESH_EXAMPLES
 	pbrtexture
 )
 
