@@ -74,6 +74,31 @@ add_test(NAME render_pbrtexture_reload_swap
         -P ${CMAKE_CURRENT_SOURCE_DIR}/RunReloadSwapTest.cmake)
 set_tests_properties(render_pbrtexture_reload_swap PROPERTIES FIXTURES_REQUIRED nanite_cache TIMEOUT 1200 RUN_SERIAL TRUE)
 
+# 6. The two-stage split: `nanite_bake` builds the caches in its own process (no window, no
+#    swapchain) and the viewer then renders them with --nanite-blob. The image has to match the
+#    golden image just like the in-viewer build does, which proves the blob - not the builder -
+#    is what the viewer depends on. Compared with imagecompare's default tolerances, exactly like
+#    tests 1 and 2.
+add_test(NAME render_pbrtexture_baked_by_tool
+    COMMAND ${CMAKE_COMMAND} ${RENDER_TEST_COMMON}
+        -DOUT=${TEST_OUTPUT_DIR}/baked_by_tool.png
+        -DREFERENCE=${RENDER_TEST_GOLDEN}
+        -DBAKE_EXE=$<TARGET_FILE:nanite_bake>
+        -DRENDER_ARGS=--nanite-blob
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/RunRenderTest.cmake)
+set_tests_properties(render_pbrtexture_baked_by_tool PROPERTIES FIXTURES_REQUIRED nanite_cache TIMEOUT 1200 RUN_SERIAL TRUE)
+
+# 7. The bake tool on its own: rebuild a model nothing else caches (venus) and re-read the result.
+#    `--verify` never opens a blob the builder itself wrote in the same process, so this checks the
+#    file on disk: magic, versions, struct sizes, section table and the strict source hash.
+add_test(NAME nanite_bake_verify
+    COMMAND ${CMAKE_COMMAND}
+        -DBAKE_EXE=$<TARGET_FILE:nanite_bake>
+        -DASSETS_DIR=${CMAKE_SOURCE_DIR}/assets
+        -DMODEL=venus
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBakeTest.cmake)
+set_tests_properties(nanite_bake_verify PROPERTIES TIMEOUT 900 RUN_SERIAL TRUE)
+
 # Self-test of the comparison tool: an image compares equal to itself and the tool reports missing files.
 add_test(NAME imagecompare_selftest
     COMMAND imagecompare ${RENDER_TEST_GOLDEN} ${RENDER_TEST_GOLDEN} --mean-tol 0 --max-bad 0)

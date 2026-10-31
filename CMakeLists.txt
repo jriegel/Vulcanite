@@ -155,6 +155,7 @@ include(FetchMetis)
 add_subdirectory(base)
 add_subdirectory(examples)
 add_subdirectory(mesh)
+add_subdirectory(tools)
 
 enable_testing()
 add_subdirectory(tests)

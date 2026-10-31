@@ -7,8 +7,8 @@ verified against the tree, not guessed. When you find something wrong, update th
 
 Vulkan C++17 renderer implementing a Nanite-style cluster/LOD pipeline. The example base is
 derived from Sascha Willems' Vulkan examples (`base/`), the Nanite pipeline lives in `mesh/`,
-and the viewer is `examples/pbrtexture/pbrtexture.cpp` (~4000 lines, the only example that
-uses the mesh library).
+the viewer is `examples/pbrtexture/pbrtexture.cpp` (~4000 lines, the only example that uses the
+mesh library), and `tools/nanite_bake/` is the headless asset-pipeline front end of the builder.
 
 Pipeline: glTF -> `vkglTF::Model` -> OpenMesh `MyMesh` per LOD -> clusters (56 tris) ->
 cluster groups (15) -> QEM edge-collapse (boundary halfedges locked) -> re-cluster, 6 LODs ->
@@ -29,8 +29,8 @@ glslang) and METIS via `cmake/FetchMetis.cmake`. `Setup.bat` configures the buil
 cmake --build build --config Release
 ```
 
-Executables land in `build/bin/Release/` (`pbrtexture.exe`, `imagecompare.exe`) and
-`build/bin/Debug/`.
+Executables land in `build/bin/Release/` (`pbrtexture.exe`, `nanite_bake.exe`, `imagecompare.exe`)
+and `build/bin/Debug/`.
 
 **Do not use the CMake Tools extension tools here**: `ListBuildTargets` and `ListTests`
 return empty for this project even though the solution builds fine. Use the terminal.
@@ -41,18 +41,30 @@ return empty for this project even though the solution builds fine. Use the term
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Six tests, all green as of writing (`render_pbrtexture_fresh`, `render_pbrtexture_cached`,
+Eight tests, all green as of writing (`render_pbrtexture_fresh`, `render_pbrtexture_cached`,
 `render_pbrtexture_blob`, `render_pbrtexture_reload`, `render_pbrtexture_reload_swap`,
-`imagecompare_selftest`). The render tests are `RUN_SERIAL` with a fixture chain: *fresh* builds
-the caches, everything else reuses them.
+`render_pbrtexture_baked_by_tool`, `nanite_bake_verify`, `imagecompare_selftest`). The render
+tests are `RUN_SERIAL` with a fixture chain: *fresh* builds the caches, everything else reuses them.
 
 - `tests/RunRenderTest.cmake` parameters: `RENDER_EXE`, `COMPARE_EXE`, `MODEL`, `OUT`,
-  `REFERENCE` (required), `ASSETS_DIR`, `FRAMES` (default 10), `CLEAN_CACHE`,
-  `RENDER_ARGS`, `COMPARE_ARGS`. It runs
+  `REFERENCE` (required), `ASSETS_DIR`, `FRAMES` (default 10), `CLEAN_CACHE`, `BAKE_EXE`,
+  `RENDER_ARGS`, `COMPARE_ARGS`. With `BAKE_EXE` set it first deletes the cache and builds it with
+  that tool before rendering. It runs
   `RENDER_EXE --capture OUT --captureframes FRAMES --model MODEL RENDER_ARGS`
   then `COMPARE_EXE OUT REFERENCE COMPARE_ARGS`.
+- `tests/RunBakeTest.cmake` (`nanite_bake_verify`) takes only `BAKE_EXE`, `ASSETS_DIR`, `MODEL`.
+  It runs `nanite_bake --rebuild` and then `nanite_bake --verify` as a **second process**, which is
+  what makes the test mean anything: `--verify` opens a blob the builder did not write in the same
+  process, so it really re-reads magic, versions, struct sizes, the section table and the strict
+  source hash from disk.
 - `imagecompare` flags: `--mean-tol <f>`, `--pixel-tol <f>`, `--max-bad <f>`, `--diff <png>`,
-  `--update`.
+  `--update`. **Defaults are `mean-tol 2.0`, `pixel-tol 24`, `max-bad 0.02`**, and tests 1/2/6 pass
+  no `COMPARE_ARGS` at all, so they run with those. Do not "verify" a render by hand with
+  `--mean-tol 0 --pixel-tol 0 --max-bad 0` and conclude something is broken: the bunny render is
+  *not* bit-identical to the golden image (mean abs diff 0.0076, 2.05% pixels differ by >0) and
+  never was — that is GPU/timing noise, invisible in the `--diff` PNG. Only tests 3, 4 and 5
+  actually demand bit equality, and each of them compares against an *earlier capture*, not the
+  golden image.
 - `tests/RunReloadSwapTest.cmake` is the reload harness: it renders `MODEL` at startup, reloads
   `RELOAD_MODEL` at `RELOAD_FRAME` via `--reload`, then renders `RELOAD_MODEL` normally and
   compares the two. It has **no** `REFERENCE` parameter — the reference is generated.
@@ -91,6 +103,19 @@ Gotchas that cost real debugging time:
 The builder (OpenMesh + METIS + JSON) and the viewer (raw POD payloads) are deliberately
 separated, and the binary blob is the contract between them.
 
+- `tools/nanite_bake/nanite_bake.cpp` is the builder as a standalone console tool:
+  `nanite_bake [--rebuild|--json-only] <model.gltf>...`, and `nanite_bake --verify <model.gltf>`
+  re-reads a blob without Vulkan or a build. It creates a headless `VkInstance` (no WSI extension)
+  and a logical device with `useSwapChain = false` only because `vkglTF::Model::loadFromFile`
+  uploads the buffers it parses.
+  **Its `glTFLoadingFlags` must stay identical to the viewer's** (`PreTransformVertices |
+  PreMultiplyVertexColors | FlipY`, plus `DontLoadImages`): `loadFromFile` rewrites `vertexBuffer`
+  in place — `FlipY` negates `pos.y`/`normal.y`, `PreTransformVertices` applies the node matrix —
+  and the builder consumes exactly those vertices. Baking with a different flag set yields a
+  mirrored mesh that passes *every* hash check (the source hash only covers the file bytes); it
+  showed up as mean abs diff 34.8 / 63% bad pixels.
+  Measured: the tool's `nanite.blob` is byte-identical (SHA1) to one baked by the viewer, and the
+  render is byte-identical to `fresh.png`/`cached.png`/`blob.png`. bunny bake ~8 s, venus ~2.5 s.
 - `mesh/NaniteBlob.{h,cpp}` — format: header + section table + 256-byte-aligned POD payloads.
   Magic `NANITE_BLOB_MAGIC 0x4244414E` ('NADB'), `NANITE_BLOB_VERSION 1`,
   `NANITE_BUILDER_VERSION 1`. Sections: `VERTICES, INDICES, CLUSTER_INFO, ERROR_INFO,
@@ -187,6 +212,16 @@ point non-interactively (the dialog is modal, so a test cannot drive it).
 - `mesh/CMakeLists.txt` and `base/CMakeLists.txt`: `mesh` uses explicit `headers`/`sources`
   lists, so **new files in `mesh/` must be added there**. `base/` globs `*.cpp`/`*.h`, so new
   files there are picked up automatically (after a CMake re-run).
+- **METIS must stay out of the shared mesh headers.** `metis` is linked `PRIVATE` on `mesh`, and
+  the only file that includes `<metis.h>` is `mesh/MetisGraph.cpp`; `mesh/Graph.h` is metis-free
+  and `mesh/IndexTypes.h` provides `metis_idx_t` (int32, matching `IDXTYPEWIDTH=32`). There is no
+  `metis.h` under `build/vcpkg_installed`, so nothing else *can* include it — keep it that way.
+  OpenMesh, by contrast, still leaks through `Common.h`/`Mesh.h`/`ClusterGroup.h`/`NaniteMesh.h`.
+- `examples/CMakeLists.txt`: `buildExample(NAME SPIRV_DEPS USE_MESH_LIB)` and the
+  `MESH_EXAMPLES` list decide whether an example links `mesh` + OpenMesh. Only `pbrtexture` is in
+  that list; adding a nanite example means adding it there. Verified with
+  `dumpbin /DEPENDENTS`: `pbribl.exe` imports only `vulkan-1.dll`, `pbrtexture.exe` also imports
+  `OpenMeshCore.dll`, `OpenMeshTools.dll`, `COMDLG32.dll`.
 - Shaders live in `shaders/glsl/<example>/` and are compiled to `.spv` by a custom command
   using `glslangValidator`; the example depends on those outputs.
 - Formatting follows the file: tabs in `pbrtexture.cpp` and `NaniteMesh.cpp`, 4 spaces in
@@ -208,10 +243,11 @@ point non-interactively (the dialog is modal, so a test cannot drive it).
 
 ## Where to look
 
-- Viewer / render loop: `examples/pbrtexture/pbrtexture.cpp` — `loadAssets()` (1168),
-  `reloadModel()` (1301), `setupDescriptorLayouts()` (1387), `writeDescriptors()` (1523),
-  `prepare()` (4116), `render()`/`keyPressed()` (~4180), `OnUpdateUIOverlay()` (4220).
+- Viewer / render loop: `examples/pbrtexture/pbrtexture.cpp` — `loadAssets()` (1164),
+  `reloadModel()` (1301), `setupDescriptorLayouts()` (1385), `writeDescriptors()` (1521),
+  `prepare()` (4114), `render()`/`keyPressed()` (~4180), `OnUpdateUIOverlay()` (4220).
 - Builder: `mesh/NaniteMesh.cpp` (`generateNaniteInfo`, `serialize`/`deserialize`,
-  `bakeBlob`/`loadBlob`, `initNaniteInfo`), `mesh/Mesh.cpp` (clustering, BVH).
+  `bakeBlob`/`loadBlob`, `initNaniteInfo`), `mesh/Mesh.cpp` (clustering, BVH),
+  `tools/nanite_bake/nanite_bake.cpp` (headless front end of the same builder).
 - Scene assembly: `mesh/NaniteScene.cpp` (`createNaniteSceneInfo` and its blob/legacy branches).
 - Base framework: `base/vulkanexamplebase.{h,cpp}`, `base/VulkanUIOverlay.{h,cpp}`.

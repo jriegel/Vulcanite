@@ -8,6 +8,8 @@
 #   REFERENCE    image to compare against (golden image, or an earlier capture)
 #   FRAMES       frames to render before capturing (default 10)
 #   CLEAN_CACHE  if set, delete the model's nanite cache first so the whole pipeline is rebuilt
+#   BAKE_EXE     if set, delete the cache and build it with this tool (nanite_bake) instead of
+#                letting the example build it itself - this is what proves the two-stage split
 #   RENDER_ARGS  extra arguments for the example executable (list), e.g. --nanite-blob
 #   COMPARE_ARGS extra imagecompare arguments (list)
 # Set the environment variable VULCANITE_UPDATE_GOLDEN=1 to overwrite REFERENCE instead of comparing.
@@ -23,6 +25,19 @@ endif()
 
 if(CLEAN_CACHE)
     file(REMOVE_RECURSE "${ASSETS_DIR}/models/${MODEL}_naniteCache")
+endif()
+
+# The asset-pipeline stage: a separate process builds the caches, so the render below must
+# produce the same image without running OpenMesh/METIS itself.
+if(DEFINED BAKE_EXE)
+    file(REMOVE_RECURSE "${ASSETS_DIR}/models/${MODEL}_naniteCache")
+    execute_process(
+        COMMAND "${BAKE_EXE}" --rebuild "${ASSETS_DIR}/models/${MODEL}.gltf"
+        RESULT_VARIABLE bake_result
+        TIMEOUT 900)
+    if(NOT bake_result EQUAL 0)
+        message(FATAL_ERROR "Bake failed (exit code/result: ${bake_result})")
+    endif()
 endif()
 
 file(REMOVE "${OUT}")
