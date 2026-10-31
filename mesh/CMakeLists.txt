@@ -22,7 +22,6 @@ set(sources
     "Cluster.cpp"
     "ClusterGroup.cpp"
     "Common.cpp"
-    "Graph.cpp"
     "Instance.cpp"
     "Mesh.cpp"
     "MeshHandler.cpp"
