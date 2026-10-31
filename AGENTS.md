@@ -81,7 +81,9 @@ Gotchas that cost real debugging time:
 - When running an exe by hand, always pass **absolute** `--capture` paths; relative paths
   resolve against the current shell directory, not `build/bin/Release`.
 - Do not pipe an interactive exe through `Select-Object -First N` — it truncates and hides
-  the output you were looking for. Use `Select-String` on the stream instead.
+  the output you were looking for, and it **kills the process** once the count is reached, so a
+  `--capture` never gets written and a cache never gets baked. Use `Select-String` on the stream
+  instead.
 - `get_errors` (the language server) can report "No errors found" while `static_assert`s
   fail. Trust the compiler.
 - **The render is frame-count sensitive.** `--captureframes 40` and `--captureframes 41` of the
@@ -108,12 +110,13 @@ separated, and the binary blob is the contract between them.
   re-reads a blob without Vulkan or a build. It creates a headless `VkInstance` (no WSI extension)
   and a logical device with `useSwapChain = false` only because `vkglTF::Model::loadFromFile`
   uploads the buffers it parses.
-  **Its `glTFLoadingFlags` must stay identical to the viewer's** (`PreTransformVertices |
-  PreMultiplyVertexColors | FlipY`, plus `DontLoadImages`): `loadFromFile` rewrites `vertexBuffer`
-  in place — `FlipY` negates `pos.y`/`normal.y`, `PreTransformVertices` applies the node matrix —
-  and the builder consumes exactly those vertices. Baking with a different flag set yields a
-  mirrored mesh that passes *every* hash check (the source hash only covers the file bytes); it
-  showed up as mean abs diff 34.8 / 63% bad pixels.
+  **Both stages load the mesh through `NaniteMesh::kBuilderLoadingFlags`** (`PreTransformVertices |
+  PreMultiplyVertexColors | FlipY`, the tool adds `DontLoadImages`): `loadFromFile` rewrites
+  `vertexBuffer` in place — `FlipY` negates `pos.y`/`normal.y`, `PreTransformVertices` applies the
+  node matrix — and the builder consumes exactly those vertices. Baking with a different flag set
+  yields a mirrored mesh that passes *every* hash check (the source hash only covers the file
+  bytes); it showed up as mean abs diff 34.8 / 63% bad pixels. Do not re-inline the flag
+  expression anywhere.
   Measured: the tool's `nanite.blob` is byte-identical (SHA1) to one baked by the viewer, and the
   render is byte-identical to `fresh.png`/`cached.png`/`blob.png`. bunny bake ~8 s, venus ~2.5 s.
 - `mesh/NaniteBlob.{h,cpp}` — format: header + section table + 256-byte-aligned POD payloads.
