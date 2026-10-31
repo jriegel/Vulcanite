@@ -8,6 +8,7 @@
 #   REFERENCE    image to compare against (golden image, or an earlier capture)
 #   FRAMES       frames to render before capturing (default 10)
 #   CLEAN_CACHE  if set, delete the model's nanite cache first so the whole pipeline is rebuilt
+#   RENDER_ARGS  extra arguments for the example executable (list), e.g. --nanite-blob
 #   COMPARE_ARGS extra imagecompare arguments (list)
 # Set the environment variable VULCANITE_UPDATE_GOLDEN=1 to overwrite REFERENCE instead of comparing.
 
@@ -29,7 +30,7 @@ get_filename_component(OUT_DIR "${OUT}" DIRECTORY)
 file(MAKE_DIRECTORY "${OUT_DIR}")
 
 execute_process(
-    COMMAND "${RENDER_EXE}" --capture "${OUT}" --captureframes ${FRAMES} --model ${MODEL}
+    COMMAND "${RENDER_EXE}" --capture "${OUT}" --captureframes ${FRAMES} --model ${MODEL} ${RENDER_ARGS}
     RESULT_VARIABLE render_result
     TIMEOUT 900)
 if(NOT render_result EQUAL 0)

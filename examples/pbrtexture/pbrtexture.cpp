@@ -270,11 +270,25 @@ public:
 
 	bool vis_topView = false;
 	std::string modelName = "dragon";
+	// How the binary nanite blob cache is used (see mesh/NaniteBlob.h).
+	NaniteMesh::BlobMode naniteBlobMode = NaniteMesh::BlobMode::Auto;
 	VulkanExample() : VulkanExampleBase(ENABLE_VALIDATION)
 	{
 		commandLineParser.add("model", { "--model" }, 1, "Model name under assets/models to nanite-ify (default dragon)");
+		commandLineParser.add("nanite-blob", { "--nanite-blob" }, false, "Load the nanite data only from the binary blob cache; fail if it is missing or stale");
+		commandLineParser.add("nanite-json", { "--nanite-json" }, false, "Use the legacy JSON nanite cache; never read or write the binary blob cache");
+		commandLineParser.add("nanite-rebuild", { "--nanite-rebuild" }, false, "Ignore every nanite cache and rebuild, then re-bake the blob cache");
 		commandLineParser.parse(args);
 		modelName = commandLineParser.getValueAsString("model", "dragon");
+		if (commandLineParser.isSet("nanite-blob")) {
+			naniteBlobMode = NaniteMesh::BlobMode::Require;
+		}
+		else if (commandLineParser.isSet("nanite-json")) {
+			naniteBlobMode = NaniteMesh::BlobMode::JsonOnly;
+		}
+		else if (commandLineParser.isSet("nanite-rebuild")) {
+			naniteBlobMode = NaniteMesh::BlobMode::Rebuild;
+		}
 		title = "Vulkanite: A dynamic LOD rendering pipeline";
 
 		camera.type = Camera::CameraType::firstperson;
@@ -1143,8 +1157,10 @@ public:
 		models.object.loadFromFile(getAssetPath() + "models/" + modelName + ".gltf", vulkanDevice, queue, glTFLoadingFlags);
 		naniteMesh.setModelPath((getAssetPath() + "models/" + modelName + "/").c_str());
 		naniteMesh.loadvkglTFModel(models.object);
-		naniteMesh.initNaniteInfo(getAssetPath() + "models/" + modelName + ".gltf", true);
+		naniteMesh.initNaniteInfo(getAssetPath() + "models/" + modelName + ".gltf", true, naniteBlobMode);
 
+		// With a blob the per-LOD OpenMesh meshes are never created, so the vertex buffers
+		// below stay empty and the scene is uploaded from the baked payloads instead.
 		for (int i = 0; i < naniteMesh.meshes.size(); i++)
 		{
 			naniteMesh.meshes[i].initUniqueVertexBuffer();
@@ -3968,7 +3984,7 @@ public:
 			if (overlay->sliderInt("Visualize Clusters", &renderingPushConstants.vis_clusters,0,3)) {
 				rebuildCB = true;
 			}
-			if (overlay->sliderInt("LOD level", &vis_clusters_level, 0, naniteMesh.meshes.size() - 1))
+			if (overlay->sliderInt("LOD level", &vis_clusters_level, 0, glm::max(1u, naniteMesh.lodNums) - 1))
 			{
 				rebuildCB = true;
 			}

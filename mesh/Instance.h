@@ -4,6 +4,9 @@
 #include "glm/glm.hpp"
 #include "Cluster.h"
 
+#include <cassert>
+#include <cstring>
+
 //#define DEBUG_LOD_START 0
 
 
@@ -51,6 +54,27 @@ struct Instance {
             break;
 #endif // DEBUG_LOD_START
         }
+    }
+
+    // Blob equivalent of `initBufferForNaniteLODs`: the blob already stores the
+    // LOD-concatenated vertices and the cluster-sorted indices with the per-LOD vertex
+    // offset applied, so this is a straight copy - no OpenMesh, no METIS.
+    void initBufferFromBlob() {
+        assert(referenceMesh->blobLoaded);
+        const NaniteBlob::Asset& blob = referenceMesh->blob;
+        assert(blob.vertexStride == sizeof(vkglTF::Vertex));
+        vertexBuffer.clear();
+        indexBuffer.clear();
+        vertexBuffer.reserve(blob.vertexCount());
+        indexBuffer.reserve(blob.indices.size());
+        const uint8_t* bytes = blob.vertices.data();
+        for (size_t i = 0; i < blob.vertexCount(); i++)
+        {
+            vkglTF::Vertex v;
+            std::memcpy(&v, bytes + i * blob.vertexStride, sizeof(vkglTF::Vertex));
+            vertexBuffer.emplace_back(v);
+        }
+        indexBuffer = blob.indices;
     }
 
     void createBuffersForNaniteLODs(vks::VulkanDevice* device, VkQueue transferQueue)

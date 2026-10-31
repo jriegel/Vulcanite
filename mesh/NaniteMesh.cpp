@@ -1,5 +1,7 @@
 #include "NaniteMesh.h"
 
+#include <cstring>
+
 void NaniteMesh::loadvkglTFModel(const vkglTF::Model& model)
 {
 	vkglTFModel = &model;
@@ -435,20 +437,158 @@ void NaniteMesh::deserialize(const std::string & filepath)
 	std::cout << std::endl;
 }
 
-void NaniteMesh::initNaniteInfo(const std::string & filepath, bool useCache) {
-	bool hasCache = false;
-	bool hasInitialized = false;
-	std::string cachePath;
-	if (filepath.find_last_of(".") != std::string::npos) {
-		cachePath = filepath.substr(0, filepath.find_last_of('.')) + "_naniteCache\\";
-	}
-	else {
+std::string NaniteMesh::cachePathFor(const std::string& filepath)
+{
+	if (filepath.find_last_of(".") == std::string::npos) {
 		ASSERT(0, "Invalid file path, no ext");
+		return "";
+	}
+	return filepath.substr(0, filepath.find_last_of('.')) + "_naniteCache\\";
+}
+
+std::string NaniteMesh::blobPathFor(const std::string& filepath)
+{
+	return cachePathFor(filepath) + "nanite.blob";
+}
+
+void NaniteMesh::bakeBlob(const std::string& filepath)
+{
+	NaniteBlob::Asset asset;
+	asset.sourcePath = filepath;
+	asset.lodNums = lodNums;
+	asset.vertexStride = static_cast<uint32_t>(sizeof(vkglTF::Vertex));
+
+	// --- vertices / indices: exactly the layout `Instance::initBufferForNaniteLODs` produces ---
+	size_t totalVerts = 0, totalIndices = 0;
+	for (size_t i = 0; i < meshes.size(); i++)
+	{
+		totalVerts += meshes[i].uniqueVertexBuffer.size();
+		totalIndices += meshes[i].triangleVertexIndicesSortedByClusterIdx.size();
+	}
+	asset.vertices.assign(totalVerts * sizeof(vkglTF::Vertex), 0);
+	asset.indices.resize(totalIndices);
+	size_t vertexCursor = 0, indexCursor = 0, runningVerts = 0;
+	for (size_t i = 0; i < meshes.size(); i++)
+	{
+		if (!meshes[i].uniqueVertexBuffer.empty()) {
+			std::memcpy(asset.vertices.data() + vertexCursor * sizeof(vkglTF::Vertex),
+				meshes[i].uniqueVertexBuffer.data(),
+				meshes[i].uniqueVertexBuffer.size() * sizeof(vkglTF::Vertex));
+		}
+		vertexCursor += meshes[i].uniqueVertexBuffer.size();
+		for (size_t j = 0; j < meshes[i].triangleVertexIndicesSortedByClusterIdx.size(); j++)
+		{
+			asset.indices[indexCursor++] =
+				static_cast<uint32_t>(meshes[i].triangleVertexIndicesSortedByClusterIdx[j])
+				+ static_cast<uint32_t>(runningVerts);
+		}
+		runningVerts += meshes[i].uniqueVertexBuffer.size();
+	}
+	ASSERT(vertexCursor == totalVerts && indexCursor == totalIndices, "blob: vertex/index bake mismatch");
+
+	// --- cluster / error info: mesh-relative, `objectIdx` intentionally left at 0 ---
+	buildClusterInfo();
+	asset.clusterInfo.resize(clusterInfo.size() * sizeof(ClusterInfo));
+	if (!clusterInfo.empty()) {
+		std::memcpy(asset.clusterInfo.data(), clusterInfo.data(), asset.clusterInfo.size());
+	}
+	asset.errorInfo.resize(errorInfo.size() * sizeof(ErrorInfo));
+	if (!errorInfo.empty()) {
+		std::memcpy(asset.errorInfo.data(), errorInfo.data(), asset.errorInfo.size());
 	}
 
-	if (useCache) {
+	// --- BVH: keep the builder's local child indices, the scene re-links them later ---
+	asset.bvhNodes.resize(flattenedBVHNodeInfos.size());
+	for (size_t i = 0; i < flattenedBVHNodeInfos.size(); i++)
+	{
+		const auto& src = flattenedBVHNodeInfos[i];
+		auto& dst = asset.bvhNodes[i];
+		dst.pMin = src.pMin;
+		dst.pMax = src.pMax;
+		dst.parentBoundingSphere = src.parentBoundingSphere;
+		dst.children = glm::ivec4(-1);
+		// Only the virtual root may have more than 4 children; its children are stored
+		// in SECTION_BVH_ROOTS instead.
+		for (size_t j = 0; j < src.children.size() && j < 4; j++) {
+			dst.children[static_cast<int>(j)] = src.children[j];
+		}
+		dst.errorWorld = glm::vec2(static_cast<float>(src.normalizedlodError), static_cast<float>(src.parentNormalizedError));
+		dst.start = static_cast<uint32_t>(src.start);
+		dst.end = static_cast<uint32_t>(src.end);
+		dst.depth = static_cast<int32_t>(src.depth);
+		dst.nodeStatus = static_cast<int32_t>(src.nodeStatus);
+		dst.lodLevel = src.lodLevel;
+		dst.index = src.index;
+	}
+	ASSERT(!flattenedBVHNodeInfos.empty(), "blob: BVH was never flattened");
+	for (size_t i = 0; i < flattenedBVHNodeInfos[0].children.size(); i++) {
+		asset.bvhRoots.push_back(static_cast<uint32_t>(flattenedBVHNodeInfos[0].children[i]));
+	}
+
+	// --- leaf -> cluster table, LOD-offset only (the scene adds the mesh offset) ---
+	asset.sortedClusterIndices = sortedClusterIndices;
+
+	asset.lodClusterNums.resize(meshes.size());
+	for (size_t i = 0; i < meshes.size(); i++) {
+		asset.lodClusterNums[i] = static_cast<uint32_t>(meshes[i].clusterNum);
+	}
+
+	std::string error;
+	if (!NaniteBlob::write(blobPathFor(filepath), asset, NaniteBlob::fnv1aFile(filepath), error)) {
+		std::cerr << "[blob] failed to bake " << blobPathFor(filepath) << ": " << error << std::endl;
+		return;
+	}
+	std::cout << "[blob] baked " << blobPathFor(filepath)
+		<< " (" << asset.vertexCount() << " verts, " << asset.indices.size() << " indices, "
+		<< asset.clusterCount() << " clusters, " << asset.bvhNodes.size() << " bvh nodes)" << std::endl;
+}
+
+bool NaniteMesh::loadBlob(const std::string& filepath, bool strictSourceHash)
+{
+	NaniteBlob::Asset asset;
+	asset.sourcePath = filepath;
+	std::string error;
+	if (!NaniteBlob::read(blobPathFor(filepath), asset, error, strictSourceHash)) {
+		std::cerr << "[blob] " << error << std::endl;
+		return false;
+	}
+	blob = std::move(asset);
+	lodNums = blob.lodNums;
+	blobLoaded = true;
+	std::cout << "[blob] loaded " << blobPathFor(filepath)
+		<< " (" << blob.vertexCount() << " verts, " << blob.indices.size() << " indices, "
+		<< blob.clusterCount() << " clusters, " << blob.bvhNodes.size() << " bvh nodes)" << std::endl;
+	return true;
+}
+
+void NaniteMesh::initNaniteInfo(const std::string & filepath, bool useCache, BlobMode blobMode) {
+	bool hasInitialized = false;
+	std::string cachePath = cachePathFor(filepath);
+
+	// 1. The binary blob is the fast path: it holds the final GPU payloads, so the
+	//    viewer never touches OpenMesh, METIS or the JSON description of the DAG.
+	const bool mayReadBlob = blobMode == BlobMode::Auto || blobMode == BlobMode::Require;
+	if (mayReadBlob && (blobMode == BlobMode::Require || useCache)) {
+		if (NaniteBlob::exists(blobPathFor(filepath))) {
+			if (loadBlob(filepath, blobMode == BlobMode::Require)) {
+				hasInitialized = true;
+			}
+			else if (blobMode == BlobMode::Require) {
+				ASSERT(0, "--nanite-blob was requested but the blob cache is unusable");
+			}
+			else {
+				std::cerr << "Blob cache unusable, falling back" << std::endl;
+			}
+		}
+		else if (blobMode == BlobMode::Require) {
+			ASSERT(0, "--nanite-blob was requested but no blob cache exists - bake one by running once without it");
+		}
+	}
+
+	// 2. The legacy JSON cache still short-circuits the (expensive) build.
+	//    `BlobMode::Rebuild` is `--nanite-rebuild`: start from the glTF and ignore both caches.
+	if (!hasInitialized && blobMode == BlobMode::Auto && useCache) {
 		std::ifstream inputFile(cachePath + "nanite_info.json");
-		// TODO: Check cache time to see if cache needs to be rebuilt
 		if (inputFile.is_open()) {
 			deserialize(cachePath);
 			hasInitialized = true;
@@ -456,13 +596,22 @@ void NaniteMesh::initNaniteInfo(const std::string & filepath, bool useCache) {
 		else {
 			std::cerr << "No cache, need to initialize from now" << std::endl;
 		}
-	}	
+	}
 
 	if (!hasInitialized) {
 		std::cerr << "Start building..." << std::endl;
 		generateNaniteInfo();
 		serialize(cachePath);
 		std::cout << cachePath << "nanite_info.json" << " generated" << std::endl;
+
+		// 3. Bake the binary cache for the next run. The current run keeps using the
+		//    freshly built in-memory state, so the two paths stay cross-checked.
+		if (blobMode != BlobMode::JsonOnly) {
+			for (size_t i = 0; i < meshes.size(); i++) {
+				meshes[i].initUniqueVertexBuffer();
+			}
+			bakeBlob(filepath);
+		}
 		//checkDeserializationResult(cachePath);
 	}
 }
@@ -534,6 +683,8 @@ void NaniteMesh::buildClusterInfo()
 		break;
 #endif // DEBUG_LOD_START
 	}
+	clusterInfo.clear();
+	errorInfo.clear();
 	clusterInfo.resize(totalClusterNum);
 	errorInfo.resize(totalClusterNum);
 	size_t currClusterNum = 0, currTriangleNum = 0;

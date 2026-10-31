@@ -40,6 +40,50 @@ public:
 		//naniteMeshes[meshName] = naniteMesh;
 	};
 
+	// Which entry of `naniteMeshes` an instance refers to. Pointer identity first: an
+	// instance may point at a mesh that lives outside the scene (the example keeps its own
+	// `naniteMesh` member and stores a copy here). `NaniteMesh::operator==` only compares
+	// the per-LOD OpenMesh meshes, which a blob-loaded mesh does not have, so blob meshes
+	// are identified by their source instead.
+	size_t meshIndexOf(const Instance& instance) const {
+		for (size_t i = 0; i < naniteMeshes.size(); i++) {
+			if (&naniteMeshes[i] == instance.referenceMesh) {
+				return i;
+			}
+		}
+		for (size_t i = 0; i < naniteMeshes.size(); i++) {
+			if (sameMesh(naniteMeshes[i], *instance.referenceMesh)) {
+				return i;
+			}
+		}
+		ASSERT(0, "instance references a mesh that is not part of the scene");
+		return 0;
+	}
+
+	static bool sameMesh(const NaniteMesh& a, const NaniteMesh& b) {
+		if (a.blobLoaded || b.blobLoaded) {
+			return a.blobLoaded && b.blobLoaded
+				&& a.blob.sourcePath == b.blob.sourcePath
+				&& a.blob.sourceHash == b.blob.sourceHash
+				&& a.lodNums == b.lodNums;
+		}
+		return a == b;
+	}
+
+	// True when every mesh in the scene came from a binary blob, i.e. the scene can be
+	// linked entirely from baked payloads without touching OpenMesh or METIS.
+	bool allMeshesBaked() const {
+		if (naniteMeshes.empty()) {
+			return false;
+		}
+		for (const auto& mesh : naniteMeshes) {
+			if (!mesh.blobLoaded) {
+				return false;
+			}
+		}
+		return true;
+	}
+
 	Instance& addInstance(const std::string & meshName, glm::mat4 transform) {
 		//Instance instance(&naniteMeshes[meshName], transform);
 		//naniteObjects.push_back(instance);
@@ -50,4 +94,10 @@ public:
 	void createVertexIndexBuffer(vks::VulkanDevice* device, VkQueue transferQueue);
 	void createClusterInfos(vks::VulkanDevice* device, VkQueue transferQueue);
 	void createBVHNodeInfos(vks::VulkanDevice* device, VkQueue transferQueue);
+
+	// Blob path for `createBVHNodeInfos`: links every instance's baked BVH into one flat
+	// array by arithmetic only. It deliberately does *not* rebuild the shared_ptr tree
+	// (`Instance::reconstructBVH`) only to flatten it again, which is what the generic
+	// path pays for. The output must be identical to the generic path.
+	void linkBlobBVHNodeInfos();
 };

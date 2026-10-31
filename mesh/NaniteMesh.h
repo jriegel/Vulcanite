@@ -8,8 +8,17 @@
 
 #include "Common.h"
 #include "Mesh.h"
+#include "NaniteBlob.h"
 
 struct NaniteMesh {
+	// How the binary blob cache (NaniteBlob.h) is used by `initNaniteInfo`.
+	enum class BlobMode {
+		Auto,    // prefer a blob, else the JSON cache, else build; always bake after a build
+		JsonOnly,// legacy path: JSON cache / build only, never read or write a blob
+		Require, // blob only - fail if it is missing or stale, proving the viewer path ran
+		Rebuild, // ignore every cache, rebuild from the glTF and re-bake the blob
+	};
+
 	uint32_t lodNums = 0;
 	glm::mat4 modelMatrix;
 	std::vector<Mesh> meshes;
@@ -50,8 +59,21 @@ struct NaniteMesh {
 	void serialize(const std::string& filepath);
 	void deserialize(const std::string& filepath);
 
+	/************ Binary asset cache (asset pipeline -> viewer) *************/
+	// The final GPU payloads, ready to be memcpy'd into storage buffers. Only filled
+	// when the mesh was loaded from a blob (see `blobLoaded`).
+	NaniteBlob::Asset blob;
+	bool blobLoaded = false;
 
-	void initNaniteInfo(const std::string& filepath, bool useCache = true);
+	// `<model>_naniteCache\\` next to the source mesh.
+	static std::string cachePathFor(const std::string& filepath);
+	static std::string blobPathFor(const std::string& filepath);
+	// Bake the GPU payloads produced by the builder into the binary cache.
+	void bakeBlob(const std::string& filepath);
+	// Load them back. Returns false if the blob is missing, stale or incompatible.
+	bool loadBlob(const std::string& filepath, bool strictSourceHash = false);
+
+	void initNaniteInfo(const std::string& filepath, bool useCache = true, BlobMode blobMode = BlobMode::Auto);
 	/*
 		What data structure should be used to store 
 		1. lods

@@ -1,10 +1,20 @@
 #include "NaniteScene.h"
 
+#include <algorithm>
+#include <queue>
+
 void NaniteScene::createNaniteSceneInfo(vks::VulkanDevice* device, VkQueue transferQueue)
 {
 	createVertexIndexBuffer(device, transferQueue);
 	createClusterInfos(device, transferQueue);
-	createBVHNodeInfos(device, transferQueue);
+	if (allMeshesBaked()) {
+		// Viewer path: link the baked BVHs arithmetically instead of rebuilding and
+		// re-flattening a shared_ptr tree per instance.
+		linkBlobBVHNodeInfos();
+	}
+	else {
+		createBVHNodeInfos(device, transferQueue);
+	}
     for (size_t i = 0; i < depthCounts.size(); i++)
     {
         std::cout << "Depth " << i << " has " << depthCounts[i] << " nodes." << std::endl;
@@ -28,7 +38,12 @@ void NaniteScene::createVertexIndexBuffer(vks::VulkanDevice* device, VkQueue tra
         auto& naniteMesh = naniteMeshes[i];
         // Init vertex & index buffer
         auto& instance = Instance(&naniteMesh, glm::mat4(1.0f));
-        instance.initBufferForNaniteLODs();
+        if (naniteMesh.blobLoaded) {
+            instance.initBufferFromBlob();
+        }
+        else {
+            instance.initBufferForNaniteLODs();
+        }
         vertexBuffer.insert(vertexBuffer.end(), instance.vertexBuffer.begin(), instance.vertexBuffer.end());
         for (auto index : instance.indexBuffer) {
             index += indexOffset;
@@ -127,10 +142,22 @@ void NaniteScene::createClusterInfos(vks::VulkanDevice* device, VkQueue transfer
     {
         auto& naniteMesh = naniteMeshes[i];
         auto& instance = Instance(&naniteMesh, glm::mat4(1.0f));
-        naniteMesh.buildClusterInfo();
-        clusterIndexOffsets[i] = clusterInfo.size();
-        //clusterInfo.insert(clusterInfo.end(), naniteMesh.clusterInfo.begin(), naniteMesh.clusterInfo.end());
-        for (auto ci : naniteMesh.clusterInfo)
+        std::vector<ClusterInfo> meshClusterInfo;
+        std::vector<ErrorInfo> meshErrorInfo;
+        if (naniteMesh.blobLoaded) {
+            // Baked payload: reinterpret the blob sections, no OpenMesh involved.
+            meshClusterInfo.assign(naniteMesh.blob.clusterInfos(),
+                naniteMesh.blob.clusterInfos() + naniteMesh.blob.clusterCount());
+            meshErrorInfo.assign(naniteMesh.blob.errorInfos(),
+                naniteMesh.blob.errorInfos() + naniteMesh.blob.errorCount());
+        }
+        else {
+            naniteMesh.buildClusterInfo();
+            meshClusterInfo.swap(naniteMesh.clusterInfo);
+            meshErrorInfo.swap(naniteMesh.errorInfo);
+        }
+        clusterIndexOffsets[i] = static_cast<uint32_t>(clusterInfo.size());
+        for (auto ci : meshClusterInfo)
         {
             if (i != 0) {
                 ci.triangleIndicesStart += indexCounts[i - 1] / 3;
@@ -138,14 +165,14 @@ void NaniteScene::createClusterInfos(vks::VulkanDevice* device, VkQueue transfer
             }
             clusterInfo.push_back(ci);
         }
-        clusterIndexCounts[i] = clusterInfo.size();
-        errorInfo.insert(errorInfo.end(), naniteMesh.errorInfo.begin(), naniteMesh.errorInfo.end());
+        clusterIndexCounts[i] = static_cast<uint32_t>(clusterInfo.size());
+        errorInfo.insert(errorInfo.end(), meshErrorInfo.begin(), meshErrorInfo.end());
     }
     ASSERT(clusterInfo.size() == errorInfo.size(), "clusterInfo.size() should be equal to errorInfo.size()");
 
     for (int i = 0; i < naniteObjects.size(); ++i) {
         auto& naniteObject = naniteObjects[i];
-        auto referenceMeshIndex = std::find(naniteMeshes.begin(), naniteMeshes.end(), *(naniteObject.referenceMesh)) - naniteMeshes.begin();
+        auto referenceMeshIndex = meshIndexOf(naniteObject);
         sceneIndicesCount += indexCounts[referenceMeshIndex];
         maxClusterNum += clusterIndexCounts[referenceMeshIndex];
     }
@@ -168,7 +195,7 @@ void NaniteScene::createBVHNodeInfos(vks::VulkanDevice* device, VkQueue transfer
     for (int i = 0; i < naniteObjects.size(); ++i) {
         auto& naniteObject = naniteObjects[i];
         naniteObject.reconstructBVH();
-        auto referenceMeshIndex = std::find(naniteMeshes.begin(), naniteMeshes.end(), *(naniteObject.referenceMesh)) - naniteMeshes.begin();
+        auto referenceMeshIndex = meshIndexOf(naniteObject);
         naniteObject.rootNode->objectIdx = i;
         naniteObject.rootNode->meshIdx = referenceMeshIndex;
         virtualRootNode->children.push_back(naniteObject.rootNode);
@@ -321,5 +348,150 @@ void NaniteScene::createBVHNodeInfos(vks::VulkanDevice* device, VkQueue transfer
     for (size_t i = 1; i <= depthCounts[0]; i++)
     {
         initNodeInfoIndices[i] = i-1;
+    }
+}
+
+// Blob path for `createBVHNodeInfos`.
+//
+// The generic path rebuilds a shared_ptr BVH tree per instance (`reconstructBVH`) only so
+// that it can immediately walk it again and write the same numbers into a flat array. When
+// the mesh came from a blob every number below can be derived directly, so this version
+// walks the baked node arrays with a queue of (object, local node index) pairs. The result
+// must be bit-identical to what `createBVHNodeInfos` produces.
+void NaniteScene::linkBlobBVHNodeInfos()
+{
+    ASSERT(allMeshesBaked(), "linkBlobBVHNodeInfos requires every mesh to be blob-loaded");
+
+    // 1. Leaf -> cluster table: the blob stores it with the per-LOD offset only, the scene
+    //    adds the per-mesh offset.
+    sortedClusterIndices.clear();
+    for (size_t i = 0; i < naniteMeshes.size(); i++)
+    {
+        const auto& blob = naniteMeshes[i].blob;
+        for (size_t j = 0; j < blob.sortedClusterIndices.size(); j++)
+        {
+            sortedClusterIndices.push_back(blob.sortedClusterIndices[j] + clusterIndexOffsets[i]);
+        }
+    }
+
+    // 2. BFS over the whole scene BVH, skipping the two virtual levels (the scene virtual
+    //    root and each instance's virtual root). Because virtual nodes are never emitted,
+    //    this yields exactly the order the generic BFS produces.
+    struct Entry
+    {
+        uint32_t objectIdx;
+        uint32_t meshIdx;
+        uint32_t localIdx;
+    };
+    std::vector<Entry> queue;
+    std::vector<std::vector<int32_t>> sceneIndexOfLocal(naniteObjects.size());
+    for (size_t o = 0; o < naniteObjects.size(); ++o)
+    {
+        NaniteMesh* mesh = naniteObjects[o].referenceMesh;
+        ASSERT(mesh && mesh->blobLoaded, "instance refers to a mesh without a baked blob");
+        const size_t meshIdx = meshIndexOf(naniteObjects[o]);
+        sceneIndexOfLocal[o].assign(mesh->blob.bvhNodes.size(), -1);
+        for (uint32_t root : mesh->blob.bvhRoots)
+        {
+            queue.push_back({ static_cast<uint32_t>(o), static_cast<uint32_t>(meshIdx), root });
+        }
+    }
+
+    bvhNodeInfos.clear();
+    bvhNodeInfos.reserve(queue.size() * 2);
+    depthCounts.clear();
+    depthLeafCounts.clear();
+
+    for (size_t head = 0; head < queue.size(); ++head)
+    {
+        const Entry entry = queue[head];
+        const NaniteBlob::Asset& blob = naniteObjects[entry.objectIdx].referenceMesh->blob;
+        const NaniteBlob::BlobBVHNode& node = blob.bvhNodes[entry.localIdx];
+        const glm::mat4& rootTransform = naniteObjects[entry.objectIdx].rootTransform;
+
+        const uint32_t sceneIdx = static_cast<uint32_t>(bvhNodeInfos.size());
+        sceneIndexOfLocal[entry.objectIdx][entry.localIdx] = static_cast<int32_t>(sceneIdx);
+
+        auto& nodeInfo = bvhNodeInfos.emplace_back();
+        nodeInfo.pMinWorld = glm::vec3(rootTransform * glm::vec4(node.pMin, 1.0f));
+        nodeInfo.pMaxWorld = glm::vec3(rootTransform * glm::vec4(node.pMax, 1.0f));
+        nodeInfo.objectId = entry.objectIdx;
+        nodeInfo.errorWorld = node.errorWorld;
+        glm::vec3 parentCenter(node.parentBoundingSphere);
+        parentCenter = glm::vec3(rootTransform * glm::vec4(parentCenter, 1.0f));
+        nodeInfo.errorRP = glm::vec4(parentCenter, node.parentBoundingSphere.w);
+        nodeInfo.clusterIntervals.x = static_cast<int32_t>(node.start + clusterIndexOffsets[entry.meshIdx]);
+        nodeInfo.clusterIntervals.y = static_cast<int32_t>(node.end + clusterIndexOffsets[entry.meshIdx]);
+
+        for (size_t j = 0; j < 4; ++j)
+        {
+            const int32_t child = node.children[static_cast<int>(j)];
+            if (child < 0)
+            {
+                continue; // childrenNodeIndices stays -1, as in the generic path
+            }
+            // Virtual nodes are never queued, so every queued entry is emitted exactly
+            // once and in queue order: a node's queue position *is* its index in
+            // `bvhNodeInfos`. That makes the child's slot known the moment it is queued,
+            // which is what the generic path only learns when it pops the child.
+            int32_t& childSlot = sceneIndexOfLocal[entry.objectIdx][static_cast<size_t>(child)];
+            if (childSlot < 0)
+            {
+                childSlot = static_cast<int32_t>(queue.size());
+                queue.push_back({ entry.objectIdx, entry.meshIdx, static_cast<uint32_t>(child) });
+            }
+            nodeInfo.childrenNodeIndices[static_cast<int>(j)] = childSlot;
+        }
+
+        ASSERT(static_cast<int>(node.depth) <= static_cast<int>(depthCounts.size()), "`depth` should never be over depthCounts.size()");
+        if (node.depth == depthCounts.size())
+        {
+            depthCounts.push_back(1);
+        }
+        else
+        {
+            depthCounts[node.depth] += 1;
+        }
+
+        if (node.nodeStatus == LEAF)
+        {
+            // Stats only. The generic path sums the node's cluster interval once per
+            // valid cluster index; there are exactly `end - start` of those, so the
+            // accumulated amount is the interval length squared.
+            const uint32_t clustersInNode = node.end - node.start;
+            const uint32_t validClusterIndicesSize = clustersInNode * clustersInNode;
+            if (node.depth >= depthLeafCounts.size())
+            {
+                depthLeafCounts.resize(node.depth + 1);
+                depthLeafCounts[node.depth] = validClusterIndicesSize;
+            }
+            else
+            {
+                depthLeafCounts[node.depth] += validClusterIndicesSize;
+            }
+        }
+    }
+
+    // Every baked node except the mesh's own virtual root (which is never emitted, its
+    // children are the `bvhRoots` seeds above) has to be reachable.
+    for (size_t o = 0; o < naniteObjects.size(); ++o)
+    {
+        const auto& nodes = naniteObjects[o].referenceMesh->blob.bvhNodes;
+        for (size_t i = 0; i < nodes.size(); ++i)
+        {
+            if (nodes[i].nodeStatus == VIRTUAL_NODE)
+            {
+                continue;
+            }
+            ASSERT(sceneIndexOfLocal[o][i] >= 0, "the blob BVH is not fully connected - a baked node is unreachable");
+        }
+    }
+
+    maxDepthCounts = std::max_element(depthCounts.begin(), depthCounts.end())[0];
+    initNodeInfoIndices.resize(depthCounts[0] + 1);
+    initNodeInfoIndices[0] = depthCounts[0];
+    for (size_t i = 1; i <= depthCounts[0]; i++)
+    {
+        initNodeInfoIndices[i] = static_cast<uint32_t>(i - 1);
     }
 }

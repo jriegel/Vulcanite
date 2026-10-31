@@ -706,6 +706,7 @@ void Mesh::initVertexBuffer(){
 
 
 void Mesh::initUniqueVertexBuffer() {
+    uniqueVertexBuffer.clear();
     for (const auto & vertex: mesh.vertices())
     {
         vkglTF::Vertex v;
