@@ -39,10 +39,17 @@
 // Bump whenever the *meaning* of a section changes but its byte layout does not
 // (e.g. the clustering algorithm changes). Bump NANITE_BLOB_VERSION instead when
 // a struct's byte layout changes.
-#define NANITE_BLOB_VERSION 1u
+// 2: the blob became a standalone file (<model>.fcc) and gained SECTION_SOURCE_PATH, so it
+//    can be loaded without the source mesh being present.
+#define NANITE_BLOB_VERSION 2u
 #define NANITE_BUILDER_VERSION 1u
 
 #define NANITE_BLOB_MAGIC 0x4244414Eu  // 'NADB' = Nanite Data Blob
+
+// File extension of a baked blob. It is a real asset file next to the source mesh
+// (`bunny.gltf` -> `bunny.fcc`), not a scratch file inside the cache directory, so it can be
+// shipped to a viewer that never runs the builder.
+#define NANITE_BLOB_EXTENSION ".fcc"
 
 namespace NaniteBlob
 {
@@ -60,6 +67,10 @@ namespace NaniteBlob
 		// children are the per-LOD root nodes. There is one per LOD, so they do not fit
 		// in the 4-wide `children` field of BlobBVHNode and are listed here instead.
 		SECTION_BVH_ROOTS = 7,      // uint32_t[] - local indices of the virtual root's children
+		// The mesh this blob was baked from, as UTF-8. Only informational: it lets a viewer
+		// open a lone .fcc and still know (and optionally re-hash) its source. A blob stays
+		// usable when that file is gone.
+		SECTION_SOURCE_PATH = 8,    // char[] - source mesh path, no NUL terminator
 		SECTION_COUNT
 	};
 
@@ -149,6 +160,9 @@ namespace NaniteBlob
 	uint64_t configHash();
 
 	// Write / read the blob. Returns false and fills `error` on any mismatch.
+	// `read` keeps whatever `asset.sourcePath` the caller set (that file is what a strict hash
+	// check re-reads) and fills it from SECTION_SOURCE_PATH when the caller left it empty - which
+	// is how a standalone .fcc knows where it came from.
 	bool write(const std::string& path, const Asset& asset, uint64_t source, std::string& error);
 	bool read(const std::string& path, Asset& asset, std::string& error, bool strictSourceHash = false);
 

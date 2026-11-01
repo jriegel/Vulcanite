@@ -2,12 +2,14 @@
 # Invoked through `cmake -P` by CTest. Parameters (-D):
 #   RENDER_EXE   example executable (e.g. pbrtexture)
 #   COMPARE_EXE  imagecompare executable
-#   MODEL        model name under assets/models
+#   MODEL        model name under assets/models, without extension (`bunny`) or the baked blob
+#                itself (`bunny.fcc`) - the latter is rendered without loading its glTF
 #   ASSETS_DIR   assets directory (used to clean the nanite cache)
 #   OUT          where the captured PNG is written
 #   REFERENCE    image to compare against (golden image, or an earlier capture)
 #   FRAMES       frames to render before capturing (default 10)
-#   CLEAN_CACHE  if set, delete the model's nanite cache first so the whole pipeline is rebuilt
+#   CLEAN_CACHE  if set, delete the model's nanite cache and blob first so the whole pipeline
+#                is rebuilt
 #   BAKE_EXE     if set, delete the cache and build it with this tool (nanite_bake) instead of
 #                letting the example build it itself - this is what proves the two-stage split
 #   RENDER_ARGS  extra arguments for the example executable (list), e.g. --nanite-blob
@@ -23,20 +25,31 @@ if(NOT DEFINED FRAMES)
     set(FRAMES 10)
 endif()
 
+# `--model bunny.fcc` renders the baked blob, but the cache and the source mesh are still named
+# after the model, so every path below is derived from the extension-less name.
+string(REGEX REPLACE "\\.[^.]+$" "" MODEL_BASE "${MODEL}")
+set(cache_dir "${ASSETS_DIR}/models/${MODEL_BASE}_naniteCache")
+set(blob "${ASSETS_DIR}/models/${MODEL_BASE}.fcc")
+
 if(CLEAN_CACHE)
-    file(REMOVE_RECURSE "${ASSETS_DIR}/models/${MODEL}_naniteCache")
+    file(REMOVE_RECURSE "${cache_dir}")
+    file(REMOVE "${blob}")
 endif()
 
 # The asset-pipeline stage: a separate process builds the caches, so the render below must
 # produce the same image without running OpenMesh/METIS itself.
 if(DEFINED BAKE_EXE)
-    file(REMOVE_RECURSE "${ASSETS_DIR}/models/${MODEL}_naniteCache")
+    file(REMOVE_RECURSE "${cache_dir}")
+    file(REMOVE "${blob}")
     execute_process(
-        COMMAND "${BAKE_EXE}" --rebuild "${ASSETS_DIR}/models/${MODEL}.gltf"
+        COMMAND "${BAKE_EXE}" --rebuild "${ASSETS_DIR}/models/${MODEL_BASE}.gltf"
         RESULT_VARIABLE bake_result
         TIMEOUT 900)
     if(NOT bake_result EQUAL 0)
         message(FATAL_ERROR "Bake failed (exit code/result: ${bake_result})")
+    endif()
+    if(NOT EXISTS "${blob}")
+        message(FATAL_ERROR "Bake succeeded but wrote no ${blob}")
     endif()
 endif()
 

@@ -19,6 +19,8 @@
 #include "VulkanDescriptorSetManager.h"
 #include "FileDialog.h"
 
+#include <stdexcept>
+
 #define ENABLE_VALIDATION true
 
 class VulkanExample : public VulkanExampleBase
@@ -1161,6 +1163,63 @@ public:
 		}
 	}
 
+	/*
+	* Loads one model into `naniteMesh` and assembles the scene from it. Used by both
+	* `loadAssets()` and `reloadModel()`, so the two cannot drift apart.
+	*
+	* A `.gltf`/`.glb` goes through vkglTF and the builder (or one of its caches). A `.fcc` is the
+	* baked blob itself: no source mesh is read at all, so OpenMesh, METIS and JSON stay out of
+	* the process and the payloads go straight into the storage buffers.
+	*/
+	void loadNaniteModel(const std::string& modelFile)
+	{
+		if (NaniteMesh::isBlobPath(modelFile)) {
+			// The blob *is* the asset. `models.object` is cleared rather than loaded: nothing in
+			// the nanite path binds it, and keeping the previous model alive would hold its
+			// vertex/index buffers for nothing.
+			models.object.clear();
+			// `setModelPath` only stores the pointer, so the string has to outlive the call.
+			// Same directory semantics as the glTF branch, even though a blob never resolves a
+			// relative path through it.
+			naniteModelDir = modelFile.substr(0, modelFile.find_last_of("\\/") + 1);
+			naniteMesh.setModelPath(naniteModelDir.c_str());
+			// Strict: there is no fallback here, so a blob whose source mesh changed has to be
+			// reported instead of silently rendering stale geometry.
+			if (!naniteMesh.initNaniteInfoFromBlob(modelFile, true)) {
+				throw std::runtime_error("cannot load blob: " + modelFile);
+			}
+		}
+		else {
+			// Must match the bake tool - see NaniteMesh::kBuilderLoadingFlags.
+			const uint32_t glTFLoadingFlags = NaniteMesh::kBuilderLoadingFlags;
+			// `loadFromFile` appends, so the previous model has to be released first.
+			models.object.clear();
+			models.object.loadFromFile(modelFile, vulkanDevice, queue, glTFLoadingFlags);
+
+			// `setModelPath` only stores the pointer, so the string has to outlive the call.
+			naniteModelDir = modelFile.substr(0, modelFile.find_last_of("\\/") + 1);
+			naniteMesh.setModelPath(naniteModelDir.c_str());
+			naniteMesh.loadvkglTFModel(models.object);
+			naniteMesh.initNaniteInfo(modelFile, true, naniteBlobMode);
+		}
+
+		// With a blob the per-LOD OpenMesh meshes are never created, so the loop below is a no-op
+		// and the scene is uploaded from the baked payloads instead. Only the *unique* per-LOD
+		// vertices are needed: `Instance::initBufferForNaniteLODs` copies them into the scene
+		// vertex buffer. The per-cluster, per-cluster-colored debug mesh
+		// (`initVertexBuffer`/`createVertexBuffer`) is only bound by the commented-out
+		// `Mesh::draw` calls in `draw()`, so it is not built here.
+		for (size_t i = 0; i < naniteMesh.meshes.size(); i++)
+		{
+			naniteMesh.meshes[i].initUniqueVertexBuffer();
+		}
+		scene.naniteMeshes.emplace_back(naniteMesh);
+
+		createScene2();
+
+		scene.createNaniteSceneInfo(vulkanDevice, queue);
+	}
+
 	void loadAssets()
 	{
 		// Must match the bake tool - see NaniteMesh::kBuilderLoadingFlags.
@@ -1168,28 +1227,12 @@ public:
 		models.skybox.loadFromFile(getAssetPath() + "models/cube.gltf", vulkanDevice, queue, glTFLoadingFlags);
 		//models.object.loadFromFile(getAssetPath() + "models/cerberus/cerberus.gltf", vulkanDevice, queue, glTFLoadingFlags);
 		//reducedModel.generateClusterInfos(models.object, vulkanDevice, queue);
-		models.object.loadFromFile(getAssetPath() + "models/" + modelName + ".gltf", vulkanDevice, queue, glTFLoadingFlags);
-		// `setModelPath` keeps the pointer, so it must not come from a temporary.
-		naniteModelDir = getAssetPath() + "models/" + modelName + "/";
-		naniteMesh.setModelPath(naniteModelDir.c_str());
-		naniteMesh.loadvkglTFModel(models.object);
-		naniteMesh.initNaniteInfo(getAssetPath() + "models/" + modelName + ".gltf", true, naniteBlobMode);
-
-		// With a blob the per-LOD OpenMesh meshes are never created, so the vertex buffers
-		// below stay empty and the scene is uploaded from the baked payloads instead.
-		// Only the *unique* per-LOD vertices are needed: `Instance::initBufferForNaniteLODs`
-		// copies them into the scene vertex buffer. The per-cluster, per-cluster-colored
-		// debug mesh (`initVertexBuffer`/`createVertexBuffer`) is only bound by the
-		// commented-out `Mesh::draw` calls in `draw()`, so it is not built here.
-		for (int i = 0; i < naniteMesh.meshes.size(); i++)
-		{
-			naniteMesh.meshes[i].initUniqueVertexBuffer();
-		}
-		scene.naniteMeshes.emplace_back(naniteMesh);
-		
-		createScene2();
-		
-		scene.createNaniteSceneInfo(vulkanDevice, queue);
+		// `--model` takes a name under assets/models; a name that already ends in `.fcc` is the
+		// baked blob and is loaded without its source mesh. `--model bunny` is unchanged by this.
+		const std::string modelFile = NaniteMesh::isBlobPath(modelName)
+			? getAssetPath() + "models/" + modelName
+			: getAssetPath() + "models/" + modelName + ".gltf";
+		loadNaniteModel(modelFile);
 		//reducedModel.simplifyModel(vulkanDevice, queue);
 		textures.environmentCube.loadFromFile(getAssetPath() + "textures/hdr/gcanyon_cube.ktx", VK_FORMAT_R16G16B16A16_SFLOAT, vulkanDevice, queue);
 		textures.albedoMap.loadFromFile(getAssetPath() + "models/cerberus/albedo.ktx", VK_FORMAT_R8G8B8A8_UNORM, vulkanDevice, queue);
@@ -1328,25 +1371,7 @@ public:
 		modelMats = defaultModelMats();
 		vis_clusters_level = 0;
 
-		const uint32_t glTFLoadingFlags = NaniteMesh::kBuilderLoadingFlags;
-		// `loadFromFile` appends, so the previous model has to be released first.
-		models.object.clear();
-		models.object.loadFromFile(modelFile, vulkanDevice, queue, glTFLoadingFlags);
-
-		// `setModelPath` only stores the pointer, so the string has to outlive the call.
-		naniteModelDir = modelFile.substr(0, modelFile.find_last_of("\\/") + 1);
-		naniteMesh.setModelPath(naniteModelDir.c_str());
-		naniteMesh.loadvkglTFModel(models.object);
-		naniteMesh.initNaniteInfo(modelFile, true, naniteBlobMode);
-
-		for (size_t i = 0; i < naniteMesh.meshes.size(); i++)
-		{
-			naniteMesh.meshes[i].initUniqueVertexBuffer();
-		}
-		scene.naniteMeshes.emplace_back(naniteMesh);
-
-		createScene2();
-		scene.createNaniteSceneInfo(vulkanDevice, queue);
+		loadNaniteModel(modelFile);
 
 		// Same order as `prepare()`, minus the one-time / model independent steps.
 		createBVHTraversalBuffers();
@@ -4175,11 +4200,14 @@ public:
 		openDialogRequested = false;
 
 		std::string picked;
+		// A `.fcc` is a first class choice: it is the baked blob and loads without its source mesh.
 		const std::vector<vks::FileFilter> filters = {
+			{ "models (glTF, nanite blob)", "*.gltf *.glb *.fcc" },
 			{ "glTF models", "*.gltf *.glb" },
+			{ "nanite blobs", "*.fcc" },
 			{ "All files", "*.*" },
 		};
-		if (!vks::openFileDialog(picked, "Load glTF model", filters, getAssetPath() + "models")) {
+		if (!vks::openFileDialog(picked, "Load model", filters, getAssetPath() + "models")) {
 			return;
 		}
 		try {

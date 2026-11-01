@@ -99,6 +99,25 @@ add_test(NAME nanite_bake_verify
         -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBakeTest.cmake)
 set_tests_properties(nanite_bake_verify PROPERTIES TIMEOUT 900 RUN_SERIAL TRUE)
 
+# 8. Opening a baked blob *instead of* a mesh: `--model bunny.fcc` loads the standalone blob the
+#    tool baked in test 6, so no glTF is parsed and OpenMesh/METIS/JSON are never touched. The
+#    image has to be bit identical to the blob-backed glTF render of test 3, which proves the
+#    blob really is a self contained asset - the .fcc alone is enough to draw the model.
+add_test(NAME render_pbrtexture_blob_only
+    COMMAND ${CMAKE_COMMAND}
+        -DRENDER_EXE=$<TARGET_FILE:pbrtexture>
+        -DCOMPARE_EXE=$<TARGET_FILE:imagecompare>
+        -DMODEL=${RENDER_TEST_MODEL}.fcc
+        -DASSETS_DIR=${CMAKE_SOURCE_DIR}/assets
+        -DFRAMES=10
+        -DOUT=${TEST_OUTPUT_DIR}/blob_only.png
+        -DREFERENCE=${TEST_OUTPUT_DIR}/blob.png
+        -DCOMPARE_ARGS=--mean-tol\;0\;--pixel-tol\;0\;--max-bad\;0
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/RunRenderTest.cmake)
+set_tests_properties(render_pbrtexture_blob_only PROPERTIES
+    FIXTURES_REQUIRED nanite_cache TIMEOUT 1200 RUN_SERIAL TRUE
+    REQUIRED_FILES ${CMAKE_SOURCE_DIR}/assets/models/${RENDER_TEST_MODEL}.fcc)
+
 # Self-test of the comparison tool: an image compares equal to itself and the tool reports missing files.
 add_test(NAME imagecompare_selftest
     COMMAND imagecompare ${RENDER_TEST_GOLDEN} ${RENDER_TEST_GOLDEN} --mean-tol 0 --max-bad 0)

@@ -41,22 +41,26 @@ return empty for this project even though the solution builds fine. Use the term
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Eight tests, all green as of writing (`render_pbrtexture_fresh`, `render_pbrtexture_cached`,
+Nine tests, all green as of writing (`render_pbrtexture_fresh`, `render_pbrtexture_cached`,
 `render_pbrtexture_blob`, `render_pbrtexture_reload`, `render_pbrtexture_reload_swap`,
-`render_pbrtexture_baked_by_tool`, `nanite_bake_verify`, `imagecompare_selftest`). The render
-tests are `RUN_SERIAL` with a fixture chain: *fresh* builds the caches, everything else reuses them.
+`render_pbrtexture_baked_by_tool`, `nanite_bake_verify`, `render_pbrtexture_blob_only`,
+`imagecompare_selftest`). The render tests are `RUN_SERIAL` with a fixture chain: *fresh* builds
+the caches, everything else reuses them.
 
 - `tests/RunRenderTest.cmake` parameters: `RENDER_EXE`, `COMPARE_EXE`, `MODEL`, `OUT`,
   `REFERENCE` (required), `ASSETS_DIR`, `FRAMES` (default 10), `CLEAN_CACHE`, `BAKE_EXE`,
-  `RENDER_ARGS`, `COMPARE_ARGS`. With `BAKE_EXE` set it first deletes the cache and builds it with
-  that tool before rendering. It runs
+  `RENDER_ARGS`, `COMPARE_ARGS`. `MODEL` is the extension-less model name (`bunny`) or the baked
+  blob itself (`bunny.fcc`, rendered without loading any glTF); the cache/blob paths are derived
+  from the extension-less part. With `BAKE_EXE` set it first deletes the cache *and* the `.fcc`
+  and builds them with that tool before rendering. It runs
   `RENDER_EXE --capture OUT --captureframes FRAMES --model MODEL RENDER_ARGS`
   then `COMPARE_EXE OUT REFERENCE COMPARE_ARGS`.
 - `tests/RunBakeTest.cmake` (`nanite_bake_verify`) takes only `BAKE_EXE`, `ASSETS_DIR`, `MODEL`.
-  It runs `nanite_bake --rebuild` and then `nanite_bake --verify` as a **second process**, which is
-  what makes the test mean anything: `--verify` opens a blob the builder did not write in the same
-  process, so it really re-reads magic, versions, struct sizes, the section table and the strict
-  source hash from disk.
+  It runs `nanite_bake --rebuild` and then `nanite_bake --verify` **twice as a separate process**,
+  once addressed by the `.gltf` and once by the `.fcc` path itself, which is what makes the test
+  mean anything: `--verify` opens a blob the builder did not write in the same process, so it
+  really re-reads magic, versions, struct sizes, the section table and the strict source hash from
+  disk — and the second run proves a blob can be validated without its source mesh being named.
 - `imagecompare` flags: `--mean-tol <f>`, `--pixel-tol <f>`, `--max-bad <f>`, `--diff <png>`,
   `--update`. **Defaults are `mean-tol 2.0`, `pixel-tol 24`, `max-bad 0.02`**, and tests 1/2/6 pass
   no `COMPARE_ARGS` at all, so they run with those. Do not "verify" a render by hand with
@@ -103,13 +107,15 @@ Gotchas that cost real debugging time:
 ## The two-stage asset pipeline
 
 The builder (OpenMesh + METIS + JSON) and the viewer (raw POD payloads) are deliberately
-separated, and the binary blob is the contract between them.
+separated, and the binary blob is the contract between them. The blob is a **standalone asset
+file**, `<model>.fcc`, not a file inside the cache directory — that is what lets it be copied,
+shipped, and opened by a viewer that never ran the builder.
 
 - `tools/nanite_bake/nanite_bake.cpp` is the builder as a standalone console tool:
   `nanite_bake [--rebuild|--json-only] <model.gltf>...`, and `nanite_bake --verify <model.gltf>`
-  re-reads a blob without Vulkan or a build. It creates a headless `VkInstance` (no WSI extension)
-  and a logical device with `useSwapChain = false` only because `vkglTF::Model::loadFromFile`
-  uploads the buffers it parses.
+  (or `--verify <model>.fcc`) re-reads a blob without Vulkan or a build. It creates a headless
+  `VkInstance` (no WSI extension) and a logical device with `useSwapChain = false` only because
+  `vkglTF::Model::loadFromFile` uploads the buffers it parses.
   **Both stages load the mesh through `NaniteMesh::kBuilderLoadingFlags`** (`PreTransformVertices |
   PreMultiplyVertexColors | FlipY`, the tool adds `DontLoadImages`): `loadFromFile` rewrites
   `vertexBuffer` in place — `FlipY` negates `pos.y`/`normal.y`, `PreTransformVertices` applies the
@@ -117,18 +123,31 @@ separated, and the binary blob is the contract between them.
   yields a mirrored mesh that passes *every* hash check (the source hash only covers the file
   bytes); it showed up as mean abs diff 34.8 / 63% bad pixels. Do not re-inline the flag
   expression anywhere.
-  Measured: the tool's `nanite.blob` is byte-identical (SHA1) to one baked by the viewer, and the
+  Measured: the tool's `<model>.fcc` is byte-identical (SHA1) to one baked by the viewer, and the
   render is byte-identical to `fresh.png`/`cached.png`/`blob.png`. bunny bake ~8 s, venus ~2.5 s.
 - `mesh/NaniteBlob.{h,cpp}` — format: header + section table + 256-byte-aligned POD payloads.
-  Magic `NANITE_BLOB_MAGIC 0x4244414E` ('NADB'), `NANITE_BLOB_VERSION 1`,
-  `NANITE_BUILDER_VERSION 1`. Sections: `VERTICES, INDICES, CLUSTER_INFO, ERROR_INFO,
-  BVH_NODES, SORTED_CLUSTER_INDICES, LOD_CLUSTER_NUMS, BVH_ROOTS`.
+  Magic `NANITE_BLOB_MAGIC 0x4244414E` ('NADB'), `NANITE_BLOB_EXTENSION ".fcc"`,
+  `NANITE_BLOB_VERSION 2`, `NANITE_BUILDER_VERSION 1`. Sections: `VERTICES, INDICES, CLUSTER_INFO,
+  ERROR_INFO, BVH_NODES, SORTED_CLUSTER_INDICES, LOD_CLUSTER_NUMS, BVH_ROOTS, SOURCE_PATH`.
+  Version 2 added `SECTION_SOURCE_PATH`: the blob records where it came from, so a lone `.fcc` is
+  self-describing and can still be re-hashed. It is *informational* — a blob stays usable when
+  that mesh is gone. `bakeBlob` stores it **absolute and canonical** (`weakly_canonical`): a
+  relative path baked by one tool would be resolved against the viewer's cwd and silently hash to
+  0, and it is what keeps a blob byte-identical no matter how the model was addressed — verified:
+  `nanite_bake assets\models\bunny.gltf`, `nanite_bake C:/Workspaces/.../bunny.gltf` and a viewer
+  `--nanite-rebuild` all produce the same SHA256.
 - Invalidation: FNV-1a 64-bit `sourceHash` over the source mesh plus a `configHash` over the
-  build configuration. A mismatch makes `read()` reject the blob.
-- Cache location: `<model>_naniteCache/` **next to the source mesh**
-  (`NaniteMesh::cachePathFor` / `blobPathFor`), holding `LOD_*.obj`, `nanite_info.json` and
-  `nanite.blob`. The trailing separator comes from `std::filesystem::path::preferred_separator`,
-  so it is not Windows-only.
+  build configuration. A mismatch makes `read()` reject the blob. The strict source check runs at
+  the **very end** of `read()` because `asset.sourcePath` may only become known through
+  `SECTION_SOURCE_PATH`; `fnv1aFile()` returns 0 for a missing file and 0 skips the check, which
+  is deliberate — a shipped blob whose mesh was deleted still loads.
+- Cache location: `<model>_naniteCache/` **next to the source mesh** (`NaniteMesh::cachePathFor`),
+  holding `LOD_*.obj` and `nanite_info.json`. The trailing separator comes from
+  `std::filesystem::path::preferred_separator`, so it is not Windows-only.
+- Blob location: `<model>.fcc`, a **sibling** of the mesh (`NaniteMesh::blobPathFor`). That
+  function is idempotent for a `.fcc` input, which is what lets the viewer hand a picked `.fcc`
+  straight to it; `NaniteMesh::isBlobPath()` recognises one (case-insensitive extension).
+  Generated `.fcc` files are git-ignored (`assets/models/*.fcc`) — they are output, not input.
 - Writing the cache is **best effort**: `NaniteMesh::serialize` returns `bool` and never asserts.
   If the directory or the JSON file cannot be written (read-only folder, network share, disk full)
   it logs `[cache] cannot create ... - continuing without a cache` and `initNaniteInfo` skips
@@ -147,6 +166,15 @@ separated, and the binary blob is the contract between them.
   check has to skip it.
 - Measured on `bunny`: fresh build ~8 s, JSON cache ~8 s, blob ~1.7 s. Blob render is
   bit-identical to the JSON-cache render (`mean abs diff 0.0000` at tol 0).
+- **The viewer can open a `.fcc` instead of a glTF.** `--model bunny.fcc` (or the file dialog, which
+  offers a `*.fcc` filter) goes through `NaniteMesh::initNaniteInfoFromBlob()` →
+  `loadBlobFile()`: no glTF is parsed, `models.object` is only *cleared*, `NaniteMesh::meshes` stays
+  empty, and every consumer branches on `blobLoaded`. `render_pbrtexture_blob_only` asserts that
+  image is bit-identical to the blob-backed glTF render, so the `.fcc` really is self contained.
+  In `pbrtexture.cpp`, `loadNaniteModel()` is the single place that loads a model (glTF *or* blob)
+  and assembles the scene — `loadAssets()` and `reloadModel()` both call it, so the two paths
+  cannot drift apart. A blob that fails to load throws `std::runtime_error`; the reload call sites
+  catch it, `loadAssets()` does not.
 
 ## Struct layouts are ABI, not implementation details
 
@@ -178,7 +206,7 @@ point non-interactively (the dialog is modal, so a test cannot drive it).
   open there and `nextFrame()` calls `updateOverlay()` *after* `render()`, so a blocking modal would
   re-enter the renderer while a command buffer is being recorded.
 - `reloadModel()` is the whole teardown/rebuild: `vkDeviceWaitIdle`, free every nanite buffer, reset
-  `scene`/`naniteMesh`/`clusterinfos`/`errorinfos`, `models.object.clear()` + `loadFromFile`, then
+  `scene`/`naniteMesh`/`clusterinfos`/`errorinfos`, `loadNaniteModel()` (glTF or `.fcc`), then
   re-run the *model dependent* steps of `prepare()` and finish with `writeDescriptors()` and
   `buildCommandBuffers()`. One-time work (`preparePipelines`, `setupRenderPass`, `createHiZBuffer`,
   `createRasterizeBuffer`, `createHWRasterizeFramebuffer`, `prepareUniformBuffers`, the env-cube and
@@ -246,11 +274,13 @@ point non-interactively (the dialog is modal, so a test cannot drive it).
 
 ## Where to look
 
-- Viewer / render loop: `examples/pbrtexture/pbrtexture.cpp` — `loadAssets()` (1164),
-  `reloadModel()` (1301), `setupDescriptorLayouts()` (1385), `writeDescriptors()` (1521),
-  `prepare()` (4114), `render()`/`keyPressed()` (~4180), `OnUpdateUIOverlay()` (4220).
+- Viewer / render loop: `examples/pbrtexture/pbrtexture.cpp` — `loadNaniteModel()` (1174),
+  `loadAssets()` (1223), `reloadModel()` (1345), `setupDescriptorLayouts()` (1411),
+  `writeDescriptors()` (1547), `prepare()` (4140), `handlePendingModelDialog()` (4195),
+  `render()` (4221), `keyPressed()` (4235), `OnUpdateUIOverlay()` (4247).
 - Builder: `mesh/NaniteMesh.cpp` (`generateNaniteInfo`, `serialize`/`deserialize`,
-  `bakeBlob`/`loadBlob`, `initNaniteInfo`), `mesh/Mesh.cpp` (clustering, BVH),
+  `bakeBlob`/`loadBlob`/`loadBlobFile`/`initNaniteInfoFromBlob`, `initNaniteInfo`,
+  `cachePathFor`/`blobPathFor`/`isBlobPath`), `mesh/Mesh.cpp` (clustering, BVH),
   `tools/nanite_bake/nanite_bake.cpp` (headless front end of the same builder).
 - Scene assembly: `mesh/NaniteScene.cpp` (`createNaniteSceneInfo` and its blob/legacy branches).
 - Base framework: `base/vulkanexamplebase.{h,cpp}`, `base/VulkanUIOverlay.{h,cpp}`.

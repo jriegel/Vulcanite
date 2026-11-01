@@ -1,5 +1,6 @@
 #include "NaniteMesh.h"
 
+#include <cctype>
 #include <cstring>
 
 void NaniteMesh::loadvkglTFModel(const vkglTF::Model& model)
@@ -457,13 +458,43 @@ std::string NaniteMesh::cachePathFor(const std::string& filepath)
 
 std::string NaniteMesh::blobPathFor(const std::string& filepath)
 {
-	return cachePathFor(filepath) + "nanite.blob";
+	const size_t dot = filepath.find_last_of(".");
+	if (dot == std::string::npos) {
+		ASSERT(0, "Invalid file path, no ext");
+		return "";
+	}
+	// `<model>.fcc` next to the source mesh. Passing a `.fcc` path through is a no-op, which is
+	// what lets the viewer hand a picked `.fcc` straight to this function.
+	return filepath.substr(0, dot) + NANITE_BLOB_EXTENSION;
+}
+
+bool NaniteMesh::isBlobPath(const std::string& path)
+{
+	const std::string ext = std::filesystem::path(path).extension().string();
+	if (ext.size() != std::strlen(NANITE_BLOB_EXTENSION)) {
+		return false;
+	}
+	// Extension comparison is case insensitive: Windows file dialogs preserve the case the user
+	// picked, and a `.FCC` is the same asset.
+	for (size_t i = 0; i < ext.size(); i++) {
+		if (std::tolower(static_cast<unsigned char>(ext[i])) != NANITE_BLOB_EXTENSION[i]) {
+			return false;
+		}
+	}
+	return true;
 }
 
 void NaniteMesh::bakeBlob(const std::string& filepath)
 {
 	NaniteBlob::Asset asset;
-	asset.sourcePath = filepath;
+	// Recorded so a standalone `.fcc` knows where it came from. Made absolute + canonical on
+	// purpose: a strict re-hash then works from any process and any working directory (a
+	// relative path baked by one tool would be resolved against the *viewer's* cwd and silently
+	// hash to 0), and baking the same mesh through two different path spellings yields the same
+	// bytes. Falls back to the given path if the filesystem refuses to resolve it.
+	std::error_code ec;
+	const std::filesystem::path canonical = std::filesystem::weakly_canonical(filepath, ec);
+	asset.sourcePath = ec ? filepath : canonical.string();
 	asset.lodNums = lodNums;
 	asset.vertexStride = static_cast<uint32_t>(sizeof(vkglTF::Vertex));
 
@@ -552,21 +583,50 @@ void NaniteMesh::bakeBlob(const std::string& filepath)
 		<< asset.clusterCount() << " clusters, " << asset.bvhNodes.size() << " bvh nodes)" << std::endl;
 }
 
-bool NaniteMesh::loadBlob(const std::string& filepath, bool strictSourceHash)
+bool NaniteMesh::loadBlobFile(const std::string& blobPath, const std::string& sourceMesh, bool strictSourceHash)
 {
 	NaniteBlob::Asset asset;
-	asset.sourcePath = filepath;
+	// Empty means "whatever the blob says". `NaniteBlob::read` fills it from
+	// SECTION_SOURCE_PATH, so a lone .fcc still knows (and can re-hash) its mesh.
+	asset.sourcePath = sourceMesh;
 	std::string error;
-	if (!NaniteBlob::read(blobPathFor(filepath), asset, error, strictSourceHash)) {
+	if (!NaniteBlob::read(blobPath, asset, error, strictSourceHash)) {
 		std::cerr << "[blob] " << error << std::endl;
 		return false;
 	}
 	blob = std::move(asset);
 	lodNums = blob.lodNums;
 	blobLoaded = true;
-	std::cout << "[blob] loaded " << blobPathFor(filepath)
+	std::cout << "[blob] loaded " << blobPath
 		<< " (" << blob.vertexCount() << " verts, " << blob.indices.size() << " indices, "
 		<< blob.clusterCount() << " clusters, " << blob.bvhNodes.size() << " bvh nodes)" << std::endl;
+	return true;
+}
+
+bool NaniteMesh::loadBlob(const std::string& filepath, bool strictSourceHash)
+{
+	return loadBlobFile(blobPathFor(filepath), filepath, strictSourceHash);
+}
+
+bool NaniteMesh::initNaniteInfoFromBlob(const std::string& blobPath, bool strictSourceHash)
+{
+	// A .gltf/.glb argument is accepted so the caller can hand over "the model I picked" and let
+	// the path rule decide where its blob lives; a .fcc argument is loaded as is.
+	const std::string path = isBlobPath(blobPath) ? blobPath : blobPathFor(blobPath);
+	if (!NaniteBlob::exists(path)) {
+		std::cerr << "[blob] no blob at " << path << std::endl;
+		return false;
+	}
+	// No source mesh is passed: the blob is the only input, so its recorded path is the only
+	// thing that can be hashed. If that mesh has been deleted the hash resolves to 0 and the
+	// check is skipped - loading a shipped blob must not require the source asset.
+	if (!loadBlobFile(path, std::string(), strictSourceHash)) {
+		return false;
+	}
+	// `meshes` stays empty on purpose: the per-LOD OpenMesh meshes are exactly what a blob
+	// replaces, and every consumer branches on `blobLoaded`.
+	std::cout << "[blob] " << path << " initialized without a source mesh - " << lodNums
+		<< " LODs" << std::endl;
 	return true;
 }
 

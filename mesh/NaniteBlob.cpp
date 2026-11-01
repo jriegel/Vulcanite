@@ -96,6 +96,7 @@ namespace NaniteBlob
 			{ SECTION_SORTED_CLUSTER_INDICES, asset.sortedClusterIndices.data(), asset.sortedClusterIndices.size(), sizeof(uint32_t) },
 			{ SECTION_LOD_CLUSTER_NUMS, asset.lodClusterNums.data(),    asset.lodClusterNums.size(), sizeof(uint32_t) },
 			{ SECTION_BVH_ROOTS,        asset.bvhRoots.data(),             asset.bvhRoots.size(), sizeof(uint32_t) },
+			{ SECTION_SOURCE_PATH,      asset.sourcePath.data(),        asset.sourcePath.size(), 1 },
 		};
 
 		std::vector<NaniteBlobSection> sections;
@@ -215,13 +216,6 @@ namespace NaniteBlob
 			error = "blob: builder config changed - rebuild the cache";
 			return false;
 		}
-		if (strictSourceHash) {
-			uint64_t current = fnv1aFile(asset.sourcePath);
-			if (current != 0 && current != header.sourceHash) {
-				error = "blob: source mesh changed - rebuild the cache";
-				return false;
-			}
-		}
 
 		if (header.sectionCount > SECTION_COUNT * 4) {
 			error = "blob: implausible section count";
@@ -268,6 +262,17 @@ namespace NaniteBlob
 		if (!readU32s(file, findSection(sections, SECTION_BVH_ROOTS), asset.bvhRoots)) {
 			error = "blob: failed reading bvhRoots"; return false;
 		}
+		{
+			// The source path is informational, so a blob written by an older builder (or one
+			// baked without a path) is still perfectly usable - it just cannot re-hash its source.
+			std::vector<uint8_t> raw;
+			if (!readRaw(file, findSection(sections, SECTION_SOURCE_PATH), raw)) {
+				error = "blob: failed reading sourcePath"; return false;
+			}
+			if (asset.sourcePath.empty() && !raw.empty()) {
+				asset.sourcePath.assign(raw.begin(), raw.end());
+			}
+		}
 		if (asset.bvhNodes.empty() || asset.bvhRoots.empty()) {
 			error = "blob: BVH data missing";
 			return false;
@@ -276,6 +281,16 @@ namespace NaniteBlob
 		if (asset.clusterCount() != asset.errorCount()) {
 			error = "blob: clusterInfo / errorInfo count mismatch after read";
 			return false;
+		}
+		// Checked last on purpose: `asset.sourcePath` may only have become known through
+		// SECTION_SOURCE_PATH above. A path that does not exist hashes to 0 and is skipped, so a
+		// standalone .fcc whose mesh has been deleted still loads.
+		if (strictSourceHash) {
+			const uint64_t current = fnv1aFile(asset.sourcePath);
+			if (current != 0 && current != header.sourceHash) {
+				error = "blob: source mesh changed - rebuild the cache";
+				return false;
+			}
 		}
 		return true;
 	}

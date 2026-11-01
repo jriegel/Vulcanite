@@ -5,16 +5,19 @@
 	QEM edge collapse -> re-cluster -> per-LOD BVH) and writes the caches the viewer
 	consumes next to the source mesh:
 
-		<model>_naniteCache/nanite_info.json   the builder's own description (legacy path)
-		<model>_naniteCache/nanite.blob        the final GPU payloads (see mesh/NaniteBlob.h)
+		<model>.fcc                          the final GPU payloads (see mesh/NaniteBlob.h)
+		<model>_naniteCache/nanite_info.json  the builder's own description (legacy path)
+		<model>_naniteCache/LOD_*.obj         the intermediate LOD meshes
 
-	After this tool has run, `pbrtexture --nanite-blob <model>` never touches OpenMesh,
-	METIS or JSON - it memcpy's the blob straight into its storage buffers.
+	The blob is a *sibling* of the mesh rather than a file inside the cache directory: it is the
+	deliverable of the asset pipeline, so it can be copied or shipped on its own. `pbrtexture
+	--model <name>.fcc` opens it without a glTF, and `pbrtexture --nanite-blob <model>` never
+	touches OpenMesh, METIS or JSON - it memcpy's the blob straight into its storage buffers.
 
 	A Vulkan device is created only because `vkglTF::Model::loadFromFile` uploads the
 	vertex/index buffers it parses; there is no window, surface or swapchain. `--verify`
 	skips Vulkan completely and only re-reads an existing blob, which makes it usable as a
- cheap CI check on baked assets.
+	cheap CI check on baked assets.
 */
 
 #include <chrono>
@@ -80,12 +83,18 @@ namespace
 			"  --rebuild     ignore existing caches and rebuild from the glTF\n"
 			"  --json-only   write only nanite_info.json, no binary blob\n"
 			"  --verify      do not build: re-read the blob of every given model and report\n"
-			"                whether it is usable (no Vulkan, no build)\n\n"
-			"Caches are written to <model>_naniteCache/ next to the source mesh.\n";
+			"                whether it is usable (no Vulkan, no build). Accepts a .fcc path\n"
+			"                directly, so a shipped blob can be checked without its mesh.\n\n"
+			"The blob is written to <model>.fcc next to the source mesh; the JSON cache and the\n"
+			"intermediate LOD meshes go to <model>_naniteCache/.\n";
 	}
 
-	// The blob is the contract between the two pipeline stages, so re-reading it here proves
-	// the bake actually produced something the viewer can consume.
+	/*
+	* The blob is the contract between the two pipeline stages, so re-reading it here proves
+	* the bake actually produced something the viewer can consume. A `.gltf` argument resolves
+	* to its `<model>.fcc` sibling; a `.fcc` argument is checked as is, which is what lets a
+	* shipped blob be verified on a machine that never ran the builder.
+	*/
 	bool verifyBlob(const std::string& modelFile)
 	{
 		const std::string path = NaniteMesh::blobPathFor(modelFile);
@@ -246,7 +255,8 @@ int main(int argc, char** argv)
 		const auto seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
 		std::cout << "[bake] " << modelFile << ": " << naniteMesh.lodNums << " LODs in "
-			<< seconds << " s -> " << NaniteMesh::cachePathFor(modelFile) << std::endl;
+			<< seconds << " s -> " << NaniteMesh::blobPathFor(modelFile) << ", "
+			<< NaniteMesh::cachePathFor(modelFile) << std::endl;
 
 		// Release the model before the device: ~vkglTF::Model uses it.
 		model.clear();

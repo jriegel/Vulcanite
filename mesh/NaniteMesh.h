@@ -78,15 +78,28 @@ struct NaniteMesh {
 	NaniteBlob::Asset blob;
 	bool blobLoaded = false;
 
-	// `<model>_naniteCache\\` next to the source mesh.
+	// `<model>_naniteCache\\` next to the source mesh; holds the JSON cache and the LOD meshes.
 	static std::string cachePathFor(const std::string& filepath);
+	// `<model>.fcc` next to the source mesh. The blob is deliberately a *sibling* of the mesh
+	// rather than a file inside the cache directory: it is the deliverable of the asset
+	// pipeline, so it can be copied, shipped, or opened by the viewer on its own.
 	static std::string blobPathFor(const std::string& filepath);
+	// True for a path the viewer can open directly instead of a glTF.
+	static bool isBlobPath(const std::string& path);
 	// Bake the GPU payloads produced by the builder into the binary cache.
 	void bakeBlob(const std::string& filepath);
 	// Load them back. Returns false if the blob is missing, stale or incompatible.
 	bool loadBlob(const std::string& filepath, bool strictSourceHash = false);
+	// Load a blob from an explicit path. `sourceMesh` is the glTF the caller has loaded: it is
+	// what a strict hash check re-reads. Left empty, the blob's own recorded source path is used
+	// instead - that is what makes a lone `.fcc` loadable even when its mesh is gone.
+	bool loadBlobFile(const std::string& blobPath, const std::string& sourceMesh = std::string(), bool strictSourceHash = false);
 
 	void initNaniteInfo(const std::string& filepath, bool useCache = true, BlobMode blobMode = BlobMode::Auto);
+	// Blob-only entry point: reaches the same state `initNaniteInfo` would, but from a `.fcc`
+	// alone - no glTF, no OpenMesh, no METIS, no JSON. `blobPath` may be a `.gltf`/`.glb`, in
+	// which case its `<model>.fcc` sibling is what gets loaded.
+	bool initNaniteInfoFromBlob(const std::string& blobPath, bool strictSourceHash = true);
 	/*
 		What data structure should be used to store 
 		1. lods
