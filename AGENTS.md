@@ -41,11 +41,12 @@ return empty for this project even though the solution builds fine. Use the term
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Nine tests, all green as of writing (`render_pbrtexture_fresh`, `render_pbrtexture_cached`,
+Thirteen tests, all green as of writing (`render_pbrtexture_fresh`, `render_pbrtexture_cached`,
 `render_pbrtexture_blob`, `render_pbrtexture_reload`, `render_pbrtexture_reload_swap`,
 `render_pbrtexture_baked_by_tool`, `nanite_bake_verify`, `render_pbrtexture_blob_only`,
-`imagecompare_selftest`). The render tests are `RUN_SERIAL` with a fixture chain: *fresh* builds
-the caches, everything else reuses them.
+`render_pbrtexture_vis1..3`, `render_pbrtexture_vis_modes_differ`, `imagecompare_selftest`). The
+render tests are `RUN_SERIAL` with a fixture chain: *fresh* builds the caches, everything else
+reuses them.
 
 - `tests/RunRenderTest.cmake` parameters: `RENDER_EXE`, `COMPARE_EXE`, `MODEL`, `OUT`,
   `REFERENCE` (required), `ASSETS_DIR`, `FRAMES` (default 10), `CLEAN_CACHE`, `BAKE_EXE`,
@@ -72,7 +73,31 @@ the caches, everything else reuses them.
 - `tests/RunReloadSwapTest.cmake` is the reload harness: it renders `MODEL` at startup, reloads
   `RELOAD_MODEL` at `RELOAD_FRAME` via `--reload`, then renders `RELOAD_MODEL` normally and
   compares the two. It has **no** `REFERENCE` parameter — the reference is generated.
-- Re-baseline the golden image with `$env:VULCANITE_UPDATE_GOLDEN = "1"` before ctest.
+- **Cluster visualization is regression tested too.** The ImGui *Visualize Clusters* slider
+  (`renderingPushConstants.vis_clusters`, 0..3) is unreachable from a test because `--capture`
+  disables the overlay (`vulkanexamplebase.cpp`: `settings.overlay = ... && !capture.active`), so
+  the viewer also takes `--visualize <0..3>`. Tests 9–11 render `bunny` with modes 1/2/3 and
+  compare against `tests/golden/pbrtexture_bunny_vis<N>.png`; mode 0 is the shaded golden of test
+  1, so all four modes are pinned. What each mode shows (`shading.frag`, `pbrtexture.frag`,
+  `merger.comp`): 1 = LOD level as flat colours, 2 = per-triangle hash of the visibility-buffer id
+  (or, depending on `uboParams.gamma`, cluster vs. cluster-group colour — the shader branches on
+  `gamma < 2.15`, so **never change gamma in a visualization test**), 3 = grayscale visibility
+  buffer id, which also swaps the merge shader to an occlusion-only result.
+  Measured: a repeat capture of each mode is **bit-identical** to its golden (`mean abs diff
+  0.0000`, 0% bad pixels) — unlike the shaded image, these modes are flat colours with no PBR
+  noise. They still run with imagecompare's default tolerances, exactly like tests 1/2/6, so a
+  different GPU that picks a slightly different LOD set does not fail the suite.
+- `tests/RunImagesDifferTest.cmake` (`render_pbrtexture_vis_modes_differ`) asserts that the four
+  captures are pairwise *different* (imagecompare exiting non-zero). Without it, a viewer that
+  ignored `--visualize` would render the shaded image four times, every vis golden would be a copy
+  of the shaded one, and tests 1–11 would all stay green. Verified: feeding it two identical images
+  fails with "Images are identical but must differ".
+- Re-baseline the golden image with `$env:VULCANITE_UPDATE_GOLDEN = "1"` before ctest. That env var
+  only helps once a golden exists: the vis tests declare `REQUIRED_FILES` on their golden, so a
+  missing one is reported as `***Not Run`, not as a failure to record. Bootstrap a new golden by
+  calling the script directly with absolute paths, e.g.
+  `cmake -DRENDER_EXE=... -DCOMPARE_EXE=... -DMODEL=bunny -DASSETS_DIR=... -DFRAMES=10 -DOUT=... -DREFERENCE=tests/golden/<name>.png "-DRENDER_ARGS=--nanite-blob;--visualize;1" -P tests/RunRenderTest.cmake`
+  with `VULCANITE_UPDATE_GOLDEN=1`.
 
 Gotchas that cost real debugging time:
 
@@ -97,6 +122,11 @@ Gotchas that cost real debugging time:
   identical — that is why `render_pbrtexture_reload_swap` uses `--mean-tol 5 --pixel-tol 16`.
 - `cmake -P script.cmake -DVAR=x` does **not** set the variables — every `-D` has to come
   *before* `-P`, i.e. `cmake -DVAR=x -P script.cmake`.
+- In a `-P` script there is **no** auto-generated `<LIST>_COUNT` for a `-D` list argument —
+  `-DIMAGES=a;b;c` gives `IMAGES` and `IMAGES_COUNT` is empty. Use `list(LENGTH IMAGES n)`.
+- In PowerShell, `"$PWD/x"` inside a *double-quoted cmake argument* is not expanded the way you
+  expect once the argument itself is quoted — a `cmake -DOUT=$PWD/...` bootstrap run silently
+  created a literal `./$PWD/` directory in the repo root. Pass absolute paths.
 - Known pre-existing builder bug: `--model teapot` / `--model sphere` dies with an access
   violation (`0xC0000005`) at the end of `NaniteMesh::generateNaniteInfo` — small meshes reach
   `clusterGroupNum == 1`, so the last LODs are identical copies. Reproduced at HEAD with a
@@ -274,10 +304,14 @@ point non-interactively (the dialog is modal, so a test cannot drive it).
 
 ## Where to look
 
-- Viewer / render loop: `examples/pbrtexture/pbrtexture.cpp` — `loadNaniteModel()` (1174),
-  `loadAssets()` (1223), `reloadModel()` (1345), `setupDescriptorLayouts()` (1411),
-  `writeDescriptors()` (1547), `prepare()` (4140), `handlePendingModelDialog()` (4195),
-  `render()` (4221), `keyPressed()` (4235), `OnUpdateUIOverlay()` (4247).
+- Viewer / render loop: `examples/pbrtexture/pbrtexture.cpp` — `loadNaniteModel()` (1180),
+  `loadAssets()` (1229), `reloadModel()` (1351), `setupDescriptorLayouts()` (1417),
+  `writeDescriptors()` (1553), `prepare()` (4146), `handlePendingModelDialog()` (4201),
+  `render()` (4227), `keyPressed()` (4241), `OnUpdateUIOverlay()` (4253).
+- Cluster visualization: `renderingPushConstants.vis_clusters` (0..3) is set by the *Visualize
+  Clusters* slider and by `--visualize`; the modes are implemented in `shaders/glsl/pbrtexture/`
+  `shading.frag` (main pass), `pbrtexture.frag` (HW-rasterized pass) and `merger.comp` (mode 3
+  changes the merge itself). See the *Test* section for how each mode is pinned.
 - Builder: `mesh/NaniteMesh.cpp` (`generateNaniteInfo`, `serialize`/`deserialize`,
   `bakeBlob`/`loadBlob`/`loadBlobFile`/`initNaniteInfoFromBlob`, `initNaniteInfo`,
   `cachePathFor`/`blobPathFor`/`isBlobPath`), `mesh/Mesh.cpp` (clustering, BVH),

@@ -287,6 +287,10 @@ public:
 	int reloadAtFrame = 10;
 	bool reloadDone = false;
 	uint32_t framesRendered = 0;
+	// --visualize <0..3> selects the same mode as the "Visualize Clusters" slider. The overlay is
+	// switched off while --capture is active, so a test cannot reach the slider - this flag is what
+	// makes the visualization modes regression testable.
+	int visualizeMode = 0;
 	VulkanExample() : VulkanExampleBase(ENABLE_VALIDATION)
 	{
 		commandLineParser.add("model", { "--model" }, 1, "Model name under assets/models to nanite-ify (default dragon)");
@@ -295,6 +299,7 @@ public:
 		commandLineParser.add("nanite-rebuild", { "--nanite-rebuild" }, false, "Ignore every nanite cache and rebuild, then re-bake the blob cache");
 		commandLineParser.add("reload", { "--reload" }, 1, "Full path of a model to load at runtime, i.e. what the file dialog would deliver (exercises the reload path)");
 		commandLineParser.add("reloadframe", { "--reloadframe" }, 1, "Frame at which --reload is applied (default 10)");
+		commandLineParser.add("visualize", { "--visualize" }, 1, "Cluster visualization mode: 0 = shaded, 1 = LOD level, 2 = cluster/cluster group id, 3 = visibility buffer id");
 		commandLineParser.parse(args);
 		modelName = commandLineParser.getValueAsString("model", "dragon");
 		if (commandLineParser.isSet("nanite-blob")) {
@@ -308,6 +313,7 @@ public:
 		}
 		reloadModelPath = commandLineParser.getValueAsString("reload", "");
 		reloadAtFrame = std::max(1, commandLineParser.getValueAsInt("reloadframe", 10));
+		renderingPushConstants.vis_clusters = std::max(0, std::min(3, commandLineParser.getValueAsInt("visualize", 0)));
 		title = "Vulkanite: A dynamic LOD rendering pipeline";
 
 		camera.type = Camera::CameraType::firstperson;
