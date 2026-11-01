@@ -64,12 +64,13 @@ reuses them.
   disk — and the second run proves a blob can be validated without its source mesh being named.
 - `imagecompare` flags: `--mean-tol <f>`, `--pixel-tol <f>`, `--max-bad <f>`, `--diff <png>`,
   `--update`. **Defaults are `mean-tol 2.0`, `pixel-tol 24`, `max-bad 0.02`**, and tests 1/2/6 pass
-  no `COMPARE_ARGS` at all, so they run with those. Do not "verify" a render by hand with
-  `--mean-tol 0 --pixel-tol 0 --max-bad 0` and conclude something is broken: the bunny render is
-  *not* bit-identical to the golden image (mean abs diff 0.0076, 2.05% pixels differ by >0) and
-  never was — that is GPU/timing noise, invisible in the `--diff` PNG. Only tests 3, 4 and 5
-  actually demand bit equality, and each of them compares against an *earlier capture*, not the
-  golden image.
+  no `COMPARE_ARGS` at all, so they run with those. Those tolerances are slack, not needed: since
+  the camera stopped moving (see *Camera and "View all"*), every bunny capture measured on this
+  machine is **bit-identical** to its golden (`mean abs diff 0.0000`, 0% bad pixels) — fresh,
+  cached, blob, reload, baked-by-tool and blob-only alike. The tolerances stay because a different
+  GPU may still pick a slightly different LOD set; do not tighten them to "prove" anything.
+  Only tests 3, 4 and 5 demand bit equality, and each of them compares against an *earlier
+  capture*, not the golden image.
 - `tests/RunReloadSwapTest.cmake` is the reload harness: it renders `MODEL` at startup, reloads
   `RELOAD_MODEL` at `RELOAD_FRAME` via `--reload`, then renders `RELOAD_MODEL` normally and
   compares the two. It has **no** `REFERENCE` parameter — the reference is generated.
@@ -115,11 +116,14 @@ Gotchas that cost real debugging time:
   instead.
 - `get_errors` (the language server) can report "No errors found" while `static_assert`s
   fail. Trust the compiler.
-- **The render is frame-count sensitive.** `--captureframes 40` and `--captureframes 41` of the
-  *same* model differ (mean abs diff ~1.7, ~3.5% bad pixels) because the LOD/culling state is
-  temporal (`lastView/lastProj` occlusion culling, HiZ). Only compare captures with an identical
-  frame count, and never expect two runs that differ in *when* a model appeared to be bit
-  identical — that is why `render_pbrtexture_reload_swap` uses `--mean-tol 5 --pixel-tol 16`.
+- **The old "frame-count sensitive" gotcha is gone — because the camera no longer moves.** With
+  `viewAll()` the pose is fixed by the model, so `--captureframes 10/11/20/21/30/40/41` of the same
+  model are now bit-identical (measured, both with and without `--nanite-blob`). Earlier captures
+  were taken while the camera was still being rotated, which is why 40 vs 41 frames used to differ
+  by mean abs diff ~1.7. If you reintroduce any camera animation (or a `viewChanged()` during
+  capture), temporal LOD/occlusion state makes the frame count matter again — and
+  `render_pbrtexture_reload_swap` already needs `--mean-tol 5 --pixel-tol 16` because there the
+  model *appears* at a different time in the two runs (measured 0.57 / 1.27% bad).
 - `cmake -P script.cmake -DVAR=x` does **not** set the variables — every `-D` has to come
   *before* `-P`, i.e. `cmake -DVAR=x -P script.cmake`.
 - In a `-P` script there is **no** auto-generated `<LIST>_COUNT` for a `-D` list argument —
@@ -131,8 +135,9 @@ Gotchas that cost real debugging time:
   violation (`0xC0000005`) at the end of `NaniteMesh::generateNaniteInfo` — small meshes reach
   `clusterGroupNum == 1`, so the last LODs are identical copies. Reproduced at HEAD with a
   `git stash`, so it is not a regression. Nothing is cached in that case (`serialize` never runs),
-  which is why `--nanite-blob` then asserts "no blob cache exists". Safe models to bake: `bunny`,
-  `venus`, `dragon`, `nanite_test*`.
+  which is why `--nanite-blob` then asserts "no blob cache exists". `--model voyager` crashes the
+  same way (exit 1 right after "LOD 0 generated"), also pre-existing and unrelated to the viewer.
+  Safe models to bake: `bunny`, `venus`, `dragon`, `nanite_test*`.
 
 ## The two-stage asset pipeline
 
@@ -205,6 +210,48 @@ shipped, and opened by a viewer that never ran the builder.
   and assembles the scene — `loadAssets()` and `reloadModel()` both call it, so the two paths
   cannot drift apart. A blob that fails to load throws `std::runtime_error`; the reload call sites
   catch it, `loadAssets()` does not.
+
+## Camera and "View all"
+
+The viewer frames the model automatically: `viewAll()` is called at the **end of
+`loadNaniteModel()`**, which is the single place a model enters the scene, so start-up and runtime
+reload frame it identically for free. Interactive entry points: `V` (`KEY_V`) and the ImGui
+*View all* / *Reset camera* buttons. `--capture` disables the overlay, so tests rely purely on the
+automatic call — there is no `--view-all` flag and none is needed.
+
+- `NaniteScene::worldBounds(pMin, pMax)` (`mesh/NaniteScene.{h,cpp}`) is the bounds source, and it
+  is the only one that exists on **both** load paths: a blob-only load (`--model bunny.fcc`)
+  clears `models.object` and never builds an OpenMesh mesh, so vkglTF's node dimensions are not
+  available there. It walks `NaniteScene::clusterInfo` per instance and applies
+  `Instance::rootTransform`.
+  Those entries are **mesh-local** (only `triangleIndicesStart/End` get offset by
+  `clusterIndexOffsets`), and the per-mesh range end is `clusterIndexOffsets[meshIdx + 1]` —
+  `clusterIndexCounts` stores an **end index, not a count**. All eight AABB corners have to be
+  transformed, not just two: `createScene2()` rotates instance 0 by −90° about Y.
+  Do *not* use `bvhNodeInfos` for bounds — their intervals are per-LOD and deep LODs cover less
+  than the model.
+- `base/camera.hpp` sign traps, all verified the hard way (the first `viewAll()` rendered only the
+  skybox):
+  - pbrtexture uses `CameraType::firstperson`, where `matrices.view = rotM * transM` — rotation
+    before translation, i.e. the camera orbits its own origin.
+  - `Camera::position` is the **negated eye** (`viewPos = position * (-1,1,-1,1)`), so placing the
+    eye means `camera.setPosition(-eye)`.
+  - `Camera::getFront()` is the **negative** of the actual look direction in this convention. The
+    convention-proof way is `-normalize(mat3(inverse(camera.matrices.view))[2])`.
+- Near/far are derived from the model (`near = max(0.01, d - 1.1r)`, `far = max(d + 1.6r, 16)`).
+  The **floor of 16 on the far plane is load-bearing**: `shaders/glsl/pbrtexture/skybox.vert`
+  multiplies by the *camera* projection and `assets/models/cube.gltf` spans ±5 (corner 8.66), so a
+  smaller far plane clips the environment away.
+- `cameraFov/cameraNear/cameraFar` and `defaultCameraRotation/defaultCameraPosition` are members
+  because `viewAll()` overwrites near/far: without them, *Reset camera* would restore the previous
+  model's frustum. `viewAllMargin` (1.15) is how much larger than exactly fitting the frustum the
+  framing is.
+- Measured framing (`[view all] …` on stdout): bunny / `bunny.fcc` center (-0.149, -0.831, 1.557),
+  radius 2.392, eye distance 5.501, near 2.870, far 16; venus radius 2.192, distance 5.043;
+  dragon radius 3.14, distance 7.22.
+- **All four goldens were re-baselined for this framing** (`pbrtexture_bunny.png`,
+  `pbrtexture_bunny_vis1/2/3.png`). If you change the framing, the pose, `viewAllMargin`, or the
+  instance transforms in `createScene2()`, every golden has to be redone.
 
 ## Struct layouts are ABI, not implementation details
 
@@ -304,10 +351,14 @@ point non-interactively (the dialog is modal, so a test cannot drive it).
 
 ## Where to look
 
-- Viewer / render loop: `examples/pbrtexture/pbrtexture.cpp` — `loadNaniteModel()` (1180),
-  `loadAssets()` (1229), `reloadModel()` (1351), `setupDescriptorLayouts()` (1417),
-  `writeDescriptors()` (1553), `prepare()` (4146), `handlePendingModelDialog()` (4201),
-  `render()` (4227), `keyPressed()` (4241), `OnUpdateUIOverlay()` (4253).
+- Viewer / render loop: `examples/pbrtexture/pbrtexture.cpp` — `createScene2()` (1123),
+  `loadNaniteModel()` (1193), `resetCamera()` (1251), `viewAll()` (1272), `loadAssets()` (1314),
+  `reloadModel()` (1436), `setupDescriptorLayouts()` (1502), `writeDescriptors()` (1638),
+  `prepare()` (4231), `handlePendingModelDialog()` (4286), `render()` (4312),
+  `keyPressed()` (4326), `OnUpdateUIOverlay()` (4341).
+- Camera framing: `viewAll()` / `resetCamera()` in `pbrtexture.cpp` (see *Camera and "View all"*),
+  bounds from `NaniteScene::worldBounds()` in `mesh/NaniteScene.cpp`, key constants in
+  `base/keycodes.hpp` (`KEY_V`, all six platform blocks).
 - Cluster visualization: `renderingPushConstants.vis_clusters` (0..3) is set by the *Visualize
   Clusters* slider and by `--visualize`; the modes are implemented in `shaders/glsl/pbrtexture/`
   `shading.frag` (main pass), `pbrtexture.frag` (HW-rasterized pass) and `merger.comp` (mode 3

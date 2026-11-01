@@ -91,6 +91,14 @@ public:
 	}
 
 	void createNaniteSceneInfo(vks::VulkanDevice* device, VkQueue transferQueue);
+
+	// World space AABB of everything the scene can draw, i.e. of every instance's clusters with
+	// `Instance::rootTransform` applied. This is the only bounds source that exists on *both*
+	// paths: a blob-only load (`--model bunny.fcc`) never builds an OpenMesh mesh and deliberately
+	// leaves `models.object` empty, so vkglTF's node dimensions are not available there.
+	// Returns false when nothing has been uploaded yet.
+	bool worldBounds(glm::vec3& pMin, glm::vec3& pMax) const;
+
 	void createVertexIndexBuffer(vks::VulkanDevice* device, VkQueue transferQueue);
 	void createClusterInfos(vks::VulkanDevice* device, VkQueue transferQueue);
 	void createBVHNodeInfos(vks::VulkanDevice* device, VkQueue transferQueue);

@@ -25,6 +25,61 @@ void NaniteScene::createNaniteSceneInfo(vks::VulkanDevice* device, VkQueue trans
     std::cout << "Total cluster count within current scene: " << maxClusterNum << std::endl;
 }
 
+/*
+* World space AABB of every cluster the scene can draw.
+*
+* `clusterInfo` is the right source and not `bvhNodeInfos`: the BVH intervals are per LOD level and
+* the deepest LOD covers less than the model, while the cluster array holds *every* LOD of every
+* mesh, so merging all of them is the full model. It is also the only bounds source that exists on
+* both paths - a blob-only load (`--model bunny.fcc`) never builds an OpenMesh mesh and leaves
+* `models.object` empty, so vkglTF's node dimensions are unavailable there.
+*
+* The entries are mesh local (only `triangleIndicesStart/End` get offset when the meshes are
+* concatenated), so the range belonging to an instance's mesh is taken from `clusterIndexOffsets`
+* and `Instance::rootTransform` is applied on top - exactly as `createBVHNodeInfos` and
+* `linkBlobBVHNodeInfos` do. Note that `clusterIndexCounts` holds an *end index*, not a count, so
+* the next mesh's offset (or the array size) is the end of the range.
+*/
+bool NaniteScene::worldBounds(glm::vec3& pMin, glm::vec3& pMax) const
+{
+    pMin = glm::vec3(FLT_MAX);
+    pMax = glm::vec3(-FLT_MAX);
+    if (naniteObjects.empty() || clusterIndexOffsets.empty() || clusterInfo.empty()) {
+        return false;
+    }
+
+    bool any = false;
+    for (const Instance& instance : naniteObjects) {
+        const size_t meshIdx = meshIndexOf(instance);
+        const uint32_t begin = clusterIndexOffsets[meshIdx];
+        const uint32_t end = (meshIdx + 1 < clusterIndexOffsets.size())
+            ? clusterIndexOffsets[meshIdx + 1]
+            : static_cast<uint32_t>(clusterInfo.size());
+
+        for (uint32_t i = begin; i < end; i++) {
+            const glm::vec3& localMin = clusterInfo[i].pMinWorld;
+            const glm::vec3& localMax = clusterInfo[i].pMaxWorld;
+            if (!(localMin.x <= localMax.x)) {
+                continue; // empty cluster
+            }
+            // A rotation makes the transformed corner pair smaller than the transformed box, so
+            // expand over all eight corners instead of transforming only two.
+            for (int corner = 0; corner < 8; corner++) {
+                const glm::vec3 local(
+                    (corner & 1) ? localMax.x : localMin.x,
+                    (corner & 2) ? localMax.y : localMin.y,
+                    (corner & 4) ? localMax.z : localMin.z);
+                const glm::vec3 world = glm::vec3(instance.rootTransform * glm::vec4(local, 1.0f));
+                pMin = glm::min(pMin, world);
+                pMax = glm::max(pMax, world);
+            }
+            any = true;
+        }
+    }
+
+    return any;
+}
+
 void NaniteScene::createVertexIndexBuffer(vks::VulkanDevice* device, VkQueue transferQueue)
 {
     std::vector<vkglTF::Vertex> vertexBuffer;

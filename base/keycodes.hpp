@@ -29,6 +29,7 @@
 #define KEY_N 0x4E
 #define KEY_O 0x4F
 #define KEY_T 0x54
+#define KEY_V 0x56
 
 #elif defined(VK_USE_PLATFORM_ANDROID_KHR)
 #define GAMEPAD_BUTTON_A 0x1000
@@ -74,6 +75,7 @@
 #define KEY_Q 'q'
 #define KEY_T 't'
 #define KEY_Z 'z'
+#define KEY_V 'v'
 
 #else // defined(VK_EXAMPLE_XCODE_GENERATED)
 // For cross-platform cmake-generated Xcode project: Use ANSI keyboard keycodes
@@ -106,6 +108,7 @@
 #define KEY_Q kVK_ANSI_Q
 #define KEY_T kVK_ANSI_T
 #define KEY_Z kVK_ANSI_Z
+#define KEY_V kVK_ANSI_V
 #endif
 
 #elif defined(VK_USE_PLATFORM_DIRECTFB_EXT)
@@ -128,6 +131,7 @@
 #define KEY_N DIKS_SMALL_N
 #define KEY_O DIKS_SMALL_O
 #define KEY_T DIKS_SMALL_T
+#define KEY_V DIKS_SMALL_V
 
 #elif defined(VK_USE_PLATFORM_WAYLAND_KHR)
 #include <linux/input.h>
@@ -157,6 +161,7 @@
 #define KEY_N 0x39
 #define KEY_O 0x20
 #define KEY_T 0x1C
+#define KEY_V 0x2F
 
 #elif defined(VK_USE_PLATFORM_SCREEN_QNX)
 #include <sys/keycodes.h>
@@ -180,5 +185,6 @@
 #define KEY_N      KEYCODE_N
 #define KEY_O      KEYCODE_O
 #define KEY_T      KEYCODE_T
+#define KEY_V      KEYCODE_V
 
 #endif

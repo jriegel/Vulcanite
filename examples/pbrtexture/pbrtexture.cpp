@@ -19,6 +19,7 @@
 #include "VulkanDescriptorSetManager.h"
 #include "FileDialog.h"
 
+#include <cmath>
 #include <stdexcept>
 
 #define ENABLE_VALIDATION true
@@ -291,6 +292,17 @@ public:
 	// switched off while --capture is active, so a test cannot reach the slider - this flag is what
 	// makes the visualization modes regression testable.
 	int visualizeMode = 0;
+	// The perspective the camera framing starts from. `viewAll()` replaces near/far with values
+	// derived from the loaded model, so these are the defaults it falls back to - keeping them here
+	// is what lets *Reset camera* restore a sane frustum instead of the last model's.
+	float cameraFov = 60.0f;
+	float cameraNear = 0.1f;
+	float cameraFar = 256.0f;
+	// Pose used before a model exists and by the *Reset camera* / V key.
+	glm::vec3 defaultCameraRotation = { -7.75f, 150.25f, 0.0f };
+	glm::vec3 defaultCameraPosition = { 0.7f, 0.1f, 1.7f };
+	// How much larger than exactly fitting the frustum *View all* frames the model.
+	float viewAllMargin = 1.15f;
 	VulkanExample() : VulkanExampleBase(ENABLE_VALIDATION)
 	{
 		commandLineParser.add("model", { "--model" }, 1, "Model name under assets/models to nanite-ify (default dragon)");
@@ -318,11 +330,12 @@ public:
 
 		camera.type = Camera::CameraType::firstperson;
 		camera.movementSpeed = 4.0f;
-		camera.setPerspective(60.0f, (float)width / (float)height, 0.1f, 256.0f);
 		camera.rotationSpeed = 0.25f;
+		camera.setPerspective(cameraFov, (float)width / (float)height, cameraNear, cameraFar);
 
-		camera.setRotation({ -7.75f, 150.25f, 0.0f });
-		camera.setPosition({ 0.7f, 0.1f, 1.7f });
+		// Starting pose only: as soon as a model is loaded, `loadNaniteModel` frames it with
+		// `viewAll()`, so this pose never decides how a model is rendered.
+		resetCamera();
 	}
 
 	~VulkanExample()
@@ -1224,6 +1237,78 @@ public:
 		createScene2();
 
 		scene.createNaniteSceneInfo(vulkanDevice, queue);
+
+		// "View all" after every load. This is the single place a model enters the scene - both
+		// `loadAssets()` and `reloadModel()` come through here - so the startup and the runtime
+		// reload path can never frame the model differently.
+		viewAll();
+	}
+
+	/*
+	* Restores the default pose and frustum. Used as the starting pose and as the fallback when a
+	* scene has no geometry to frame.
+	*/
+	void resetCamera()
+	{
+		camera.setPerspective(cameraFov, (float)width / (float)height, cameraNear, cameraFar);
+		camera.setRotation(defaultCameraRotation);
+		camera.setPosition(defaultCameraPosition);
+	}
+
+	/*
+	* "View all": frame the loaded model so that it fits the viewport, and derive the near and far
+	* plane from its depth range. The pose in the constructor was tuned for one model; every other
+	* model (and every instance set) would otherwise be rendered half out of frame.
+	*
+	* The bounds come from the scene's cluster AABBs (`NaniteScene::worldBounds`), which exist on
+	* both the builder and the blob path. vkglTF's node dimensions do not: a `.fcc` load never parses
+	* a mesh and clears `models.object`.
+	*
+	* The camera is `firstperson`, whose view matrix is `rotM * transM` - an orbit about the camera
+	* origin, with `position` being the *negated* eye. So keeping `rotation` and only moving
+	* `position` slides the eye along the existing view direction, which keeps this fully
+	* non-interactive: the orientation a run starts with is preserved.
+	*/
+	void viewAll()
+	{
+		glm::vec3 pMin, pMax;
+		glm::vec3 center = glm::vec3(0.0f);
+		float radius = 1.0f;
+		if (scene.worldBounds(pMin, pMax)) {
+			center = (pMin + pMax) * 0.5f;
+			radius = std::max(0.001f, glm::length(pMax - pMin) * 0.5f);
+		}
+
+		// Fit the bounding sphere vertically *and* horizontally - the narrower half angle is the one
+		// that limits, so on a wide screen the vertical field is what decides the distance.
+		const float aspect = (height > 0) ? (float)width / (float)height : 1.0f;
+		const float halfFovY = glm::radians(cameraFov * 0.5f);
+		const float halfFovX = atanf(tanf(halfFovY) * aspect);
+		const float distance = radius / sinf(std::min(halfFovY, halfFovX)) * viewAllMargin;
+
+		// The direction the camera actually looks, taken from its own view matrix instead of
+		// `Camera::getFront()`: for `firstperson` the view matrix is `rotM * transM`, which makes the
+		// look direction the *negative* of the euler derived front vector. Reading it back is what
+		// keeps this correct for the flipY / rotation conventions of the base camera as well.
+		const glm::mat4 camToWorld = glm::inverse(camera.matrices.view);
+		const glm::vec3 viewDir = -glm::normalize(glm::vec3(camToWorld[2]));
+		const glm::vec3 eye = center - viewDir * distance;
+		// `position` is the negated eye (see `Camera::updateViewMatrix`). This example never sets
+		// `camera.flipY`, which would negate y a second time.
+		camera.setPosition(-eye);
+
+		// Near/far from the model's depth range rather than a fixed pair: a 32 bit depth buffer that
+		// is shared by a 0.1..256 frustum loses precision on a model that is a tenth of a unit wide.
+		// The far plane additionally has to keep the skybox, which is drawn *around* the camera with
+		// this very projection (cube.gltf spans +/-5, corner distance ~8.7), so it never drops below
+		// that - otherwise framing a small model would clip the environment.
+		const float nearClip = std::max(0.01f, distance - radius * 1.1f);
+		const float farClip = std::max(distance + radius * 1.6f, 16.0f);
+		camera.setPerspective(cameraFov, aspect, nearClip, farClip);
+
+		std::cout << "[view all] center (" << center.x << ", " << center.y << ", " << center.z
+			<< "), radius " << radius << ", eye distance " << distance << ", near " << nearClip
+			<< ", far " << farClip << std::endl;
 	}
 
 	void loadAssets()
@@ -4243,6 +4328,9 @@ public:
 		if (key == KEY_O) {
 			requestModelDialog();
 		}
+		if (key == KEY_V) {
+			viewAll();
+		}
 	}
 
 	virtual void viewChanged()
@@ -4300,6 +4388,13 @@ public:
 				requestModelDialog();
 			}
 			overlay->text("or press O");
+			if (overlay->button("View all")) {
+				viewAll();
+			}
+			overlay->text("or press V - frames the loaded model; applied after start and reload too");
+			if (overlay->button("Reset camera")) {
+				resetCamera();
+			}
 		}
 		if (rebuildCB)
 		{
