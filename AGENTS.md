@@ -41,10 +41,11 @@ return empty for this project even though the solution builds fine. Use the term
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Thirteen tests, all green as of writing (`render_pbrtexture_fresh`, `render_pbrtexture_cached`,
+Fourteen tests, all green as of writing (`render_pbrtexture_fresh`, `render_pbrtexture_cached`,
 `render_pbrtexture_blob`, `render_pbrtexture_reload`, `render_pbrtexture_reload_swap`,
 `render_pbrtexture_baked_by_tool`, `nanite_bake_verify`, `render_pbrtexture_blob_only`,
-`render_pbrtexture_vis1..3`, `render_pbrtexture_vis_modes_differ`, `imagecompare_selftest`). The
+`render_pbrtexture_vis1..3`, `render_pbrtexture_vis_modes_differ`,
+`render_pbrtexture_blob_reload_twice`, `imagecompare_selftest`). The
 render tests are `RUN_SERIAL` with a fixture chain: *fresh* builds the caches, everything else
 reuses them.
 
@@ -69,11 +70,18 @@ reuses them.
   machine is **bit-identical** to its golden (`mean abs diff 0.0000`, 0% bad pixels) — fresh,
   cached, blob, reload, baked-by-tool and blob-only alike. The tolerances stay because a different
   GPU may still pick a slightly different LOD set; do not tighten them to "prove" anything.
-  Only tests 3, 4 and 5 demand bit equality, and each of them compares against an *earlier
+  Only tests 3, 4, 5 and 13 demand bit equality, and each of them compares against an *earlier
   capture*, not the golden image.
 - `tests/RunReloadSwapTest.cmake` is the reload harness: it renders `MODEL` at startup, reloads
   `RELOAD_MODEL` at `RELOAD_FRAME` via `--reload`, then renders `RELOAD_MODEL` normally and
   compares the two. It has **no** `REFERENCE` parameter — the reference is generated.
+- **`render_pbrtexture_blob_reload_twice` is the `.fcc` crash regression test.** It opens
+  `bunny.fcc` at startup and reloads it **twice** (`--reload … --reloadframe 5 --reload2 …
+  --reload2frame 8`), which is the only way a test can reach the file dialog's "pick a second blob"
+  path — the old harness could express exactly one reload. Every reload tears down `models.object`,
+  which on the blob path was never loaded, so this is what catches uninitialized `vkglTF::Model`
+  members (see *Runtime model reload*). Compared bit-exact against `blob_only.png` from test 8, so a
+  reload that silently drops the scene fails too. Measured: bit-identical (`0.0000`, 0% bad).
 - **Cluster visualization is regression tested too.** The ImGui *Visualize Clusters* slider
   (`renderingPushConstants.vis_clusters`, 0..3) is unreachable from a test because `--capture`
   disables the overlay (`vulkanexamplebase.cpp`: `settings.overlay = ... && !capture.active`), so
@@ -275,8 +283,10 @@ Verified in this build (`glm::vec3` is 12 bytes / 4-byte aligned, which trips pe
 ## Runtime model reload
 
 The viewer can swap the nanite-ified model while running: the ImGui button *Load model...* or `O`
-(`KEY_O`) opens a native file dialog, and `--reload <file> [--reloadframe N]` feeds the same entry
-point non-interactively (the dialog is modal, so a test cannot drive it).
+(`KEY_O`) opens a native file dialog, and `--reload <file> [--reloadframe N]` plus
+`--reload2 <file> [--reload2frame N]` feed the same entry point non-interactively (the dialog is
+modal, so a test cannot drive it). `handlePendingCommandLineReload()` applies the requests in frame
+order, at most one per frame, so two reloads cannot collapse into a single call.
 
 - `pbrtexture.cpp`: `requestModelDialog()` sets a flag that `handlePendingModelDialog()` consumes
   at the **top of `render()`**. Never open the dialog from `OnUpdateUIOverlay` — the ImGui frame is
@@ -294,7 +304,17 @@ point non-interactively (the dialog is modal, so a test cannot drive it).
   every node, buffer and texture. `clear()` releases the vertex/index buffers, textures, nodes,
   skins, the model's descriptor pool and `emptyTexture`, but *not* the process-wide
   `vkglTF::descriptorSetLayoutUbo/Image` globals — destroying those would invalidate every other
-  model still in use (`models.skybox`, `models.cube`).
+  model still in use (`models.skybox`, `models.cube`). Those globals are now never destroyed
+  explicitly; they go away with the device, and `~Model()` is just `clear()`.
+- **`vkglTF::Model::device` and `descriptorPool` must stay value-initialized.** On the blob path
+  (`--model bunny.fcc`) `models.object` is *never loaded* and every reload still calls
+  `models.object.clear()`; the `if (device == nullptr) return;` guard only helps if `device` is
+  actually null. Uninitialized it was a wild read — proven from a WER minidump:
+  `0xC0000005` reading `0xC4008` at `movq 0x8(%rcx),%rcx` (`device->logicalDevice`, `rcx = 0xC4000`)
+  right before `vkDestroyDescriptorPool`, i.e. `pbrtexture.exe+0x7FA8E`. `clear()` also resets
+  `device = nullptr` so it is idempotent. Same rule for `NaniteMesh`'s raw pointers
+  (`vkglTFModel`, `vkglTFMesh`, `device`, `model`, the tinygltf pair): none of them is ever set on
+  the blob path, and a `NaniteMesh` is default-constructed and re-assigned on every reload.
 - `vkglTF::Model::Vertices`/`Indices` are zero-initialized so a reload can tell "never created"
   from "created"; keep it that way if you add fields.
 - **Never call `vks::Buffer::destroy()` on the pbrtexture storage buffers.** They are created
@@ -307,8 +327,17 @@ point non-interactively (the dialog is modal, so a test cannot drive it).
 - `NaniteMesh::setModelPath(const char*)` only stores the pointer — keep the string alive
   (`pbrtexture.cpp` keeps it in the `naniteModelDir` member).
 - `base/FileDialog.{h,cpp}` wraps `GetOpenFileNameW` (UTF-8 in/out). `WINLIBS` is referenced in the
-  CMake files but never `set()`, so system libraries must be listed explicitly — `comdlg32` was
-  added to `base/CMakeLists.txt` for this.
+  CMake files but never `set()`, so system libraries must be listed explicitly — `comdlg32` and
+  `comctl32` are both in `base/CMakeLists.txt`. The dialog is a *common control*: it calls
+  `InitCommonControlsEx` once per process (without it the first dialog still opens off the shell
+  fallback and a later one faults inside Comctl32) and the viewer passes its own `HWND` as
+  `ofn.hwndOwner` so the modal dialog pumps messages through a real owner window.
+  Verified: `pbrtexture.exe` imports `COMDLG32.dll` **and** `COMCTL32.dll`.
+- **Not our bug, but it looks like one:** a crash in the *second* file dialog on this machine is
+  third-party. Its minidump is a DEP execute violation at `comctl32.dll+0x1E9778` — inside `.rdata`, past
+  the `fothk` hook section — and the stack is full of `windows.storage.dll` / `comdlg32.dll` frames
+  interleaved with `umppc21309.dll` and `CsXumd64_21309.dll`, i.e. the **CrowdStrike Falcon Sensor**
+  support modules. Check for injected DLLs in a crash dump before blaming the viewer.
 - Reloading a model whose `_naniteCache/` directory cannot be created is fine: `serialize`
   reports `[cache] cannot create ... - continuing without a cache` and the model still renders
   (verified by pointing the cache path at a plain file). It used to hit
@@ -329,7 +358,7 @@ point non-interactively (the dialog is modal, so a test cannot drive it).
   `MESH_EXAMPLES` list decide whether an example links `mesh` + OpenMesh. Only `pbrtexture` is in
   that list; adding a nanite example means adding it there. Verified with
   `dumpbin /DEPENDENTS`: `pbribl.exe` imports only `vulkan-1.dll`, `pbrtexture.exe` also imports
-  `OpenMeshCore.dll`, `OpenMeshTools.dll`, `COMDLG32.dll`.
+  `OpenMeshCore.dll`, `OpenMeshTools.dll`, `COMDLG32.dll`, `COMCTL32.dll`.
 - Shaders live in `shaders/glsl/<example>/` and are compiled to `.spv` by a custom command
   using `glslangValidator`; the example depends on those outputs.
 - Formatting follows the file: tabs in `pbrtexture.cpp` and `NaniteMesh.cpp`, 4 spaces in
@@ -351,11 +380,12 @@ point non-interactively (the dialog is modal, so a test cannot drive it).
 
 ## Where to look
 
-- Viewer / render loop: `examples/pbrtexture/pbrtexture.cpp` — `createScene2()` (1123),
-  `loadNaniteModel()` (1193), `resetCamera()` (1251), `viewAll()` (1272), `loadAssets()` (1314),
-  `reloadModel()` (1436), `setupDescriptorLayouts()` (1502), `writeDescriptors()` (1638),
-  `prepare()` (4231), `handlePendingModelDialog()` (4286), `render()` (4312),
-  `keyPressed()` (4326), `OnUpdateUIOverlay()` (4341).
+- Viewer / render loop: `examples/pbrtexture/pbrtexture.cpp` — `createScene2()` (1134),
+  `loadNaniteModel()` (1204), `resetCamera()` (1262), `viewAll()` (1283), `loadAssets()` (1325),
+  `reloadModel()` (1447), `setupDescriptorLayouts()` (1513), `writeDescriptors()` (1649),
+  `prepare()` (4247), `handlePendingCommandLineReload()` (4284),
+  `handlePendingModelDialog()` (4306), `render()` (4332), `keyPressed()` (4346),
+  `OnUpdateUIOverlay()` (4361).
 - Camera framing: `viewAll()` / `resetCamera()` in `pbrtexture.cpp` (see *Camera and "View all"*),
   bounds from `NaniteScene::worldBounds()` in `mesh/NaniteScene.cpp`, key constants in
   `base/keycodes.hpp` (`KEY_V`, all six platform blocks).

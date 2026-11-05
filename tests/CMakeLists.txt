@@ -149,6 +149,28 @@ set_tests_properties(render_pbrtexture_vis_modes_differ PROPERTIES
     FIXTURES_REQUIRED nanite_cache TIMEOUT 300 RUN_SERIAL TRUE
     REQUIRED_FILES ${TEST_OUTPUT_DIR}/vis3.png)
 
+# 13. Loading a blob *twice at runtime*: `bunny.fcc` is opened at startup and then re-loaded two
+#     more times through the reload path - the regression test for the crash when a `.fcc` was picked
+#     a second time in the file dialog. On the blob path `models.object` is never loaded, so every
+#     reload tears down an unloaded `vkglTF::Model`, and an uninitialized `Model::device` turned that
+#     into a wild read at `vkDestroyDescriptorPool`. The image must stay bit identical to the single
+#     blob-only render of test 8, so a reload that silently drops the scene fails too.
+add_test(NAME render_pbrtexture_blob_reload_twice
+    COMMAND ${CMAKE_COMMAND}
+        -DRENDER_EXE=$<TARGET_FILE:pbrtexture>
+        -DCOMPARE_EXE=$<TARGET_FILE:imagecompare>
+        -DMODEL=${RENDER_TEST_MODEL}.fcc
+        -DASSETS_DIR=${CMAKE_SOURCE_DIR}/assets
+        -DFRAMES=10
+        -DOUT=${TEST_OUTPUT_DIR}/blob_reload_twice.png
+        -DREFERENCE=${TEST_OUTPUT_DIR}/blob_only.png
+        -DRENDER_ARGS=--reload\;${CMAKE_SOURCE_DIR}/assets/models/${RENDER_TEST_MODEL}.fcc\;--reloadframe\;5\;--reload2\;${CMAKE_SOURCE_DIR}/assets/models/${RENDER_TEST_MODEL}.fcc\;--reload2frame\;8
+        -DCOMPARE_ARGS=--mean-tol\;0\;--pixel-tol\;0\;--max-bad\;0
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/RunRenderTest.cmake)
+set_tests_properties(render_pbrtexture_blob_reload_twice PROPERTIES
+    FIXTURES_REQUIRED nanite_cache TIMEOUT 1200 RUN_SERIAL TRUE
+    REQUIRED_FILES ${CMAKE_SOURCE_DIR}/assets/models/${RENDER_TEST_MODEL}.fcc)
+
 # Self-test of the comparison tool: an image compares equal to itself and the tool reports missing files.
 add_test(NAME imagecompare_selftest
     COMMAND imagecompare ${RENDER_TEST_GOLDEN} ${RENDER_TEST_GOLDEN} --mean-tol 0 --max-bad 0)

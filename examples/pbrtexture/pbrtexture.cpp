@@ -282,11 +282,16 @@ public:
 	bool openDialogRequested = false;
 	// `NaniteMesh::setModelPath` stores a raw const char*, so the string must outlive the call.
 	std::string naniteModelDir;
-	// --reload <file> runs `reloadModel` after `reloadAtFrame` frames. The file dialog is modal and
-	// cannot be driven from a test, so this is what makes the reload path regression testable.
-	std::string reloadModelPath;
-	int reloadAtFrame = 10;
-	bool reloadDone = false;
+	// `--reload <file>` / `--reload2 <file>` run `reloadModel` at a given frame. The file dialog is
+	// modal and cannot be driven from a test, so this is what makes the reload path regression
+	// testable. It is a *list* on purpose: a single reload cannot express "load the same asset a
+	// second time", which is the case that used to crash.
+	struct CommandLineReload {
+		std::string path;
+		int atFrame = 10;
+		bool done = false;
+	};
+	std::vector<CommandLineReload> commandLineReloads;
 	uint32_t framesRendered = 0;
 	// --visualize <0..3> selects the same mode as the "Visualize Clusters" slider. The overlay is
 	// switched off while --capture is active, so a test cannot reach the slider - this flag is what
@@ -311,6 +316,8 @@ public:
 		commandLineParser.add("nanite-rebuild", { "--nanite-rebuild" }, false, "Ignore every nanite cache and rebuild, then re-bake the blob cache");
 		commandLineParser.add("reload", { "--reload" }, 1, "Full path of a model to load at runtime, i.e. what the file dialog would deliver (exercises the reload path)");
 		commandLineParser.add("reloadframe", { "--reloadframe" }, 1, "Frame at which --reload is applied (default 10)");
+		commandLineParser.add("reload2", { "--reload2" }, 1, "Second model to load at runtime - reloads twice, i.e. what pressing O twice would deliver");
+		commandLineParser.add("reload2frame", { "--reload2frame" }, 1, "Frame at which --reload2 is applied (default 20)");
 		commandLineParser.add("visualize", { "--visualize" }, 1, "Cluster visualization mode: 0 = shaded, 1 = LOD level, 2 = cluster/cluster group id, 3 = visibility buffer id");
 		commandLineParser.parse(args);
 		modelName = commandLineParser.getValueAsString("model", "dragon");
@@ -323,8 +330,12 @@ public:
 		else if (commandLineParser.isSet("nanite-rebuild")) {
 			naniteBlobMode = NaniteMesh::BlobMode::Rebuild;
 		}
-		reloadModelPath = commandLineParser.getValueAsString("reload", "");
-		reloadAtFrame = std::max(1, commandLineParser.getValueAsInt("reloadframe", 10));
+		if (const std::string reload1 = commandLineParser.getValueAsString("reload", ""); !reload1.empty()) {
+			commandLineReloads.push_back({ reload1, std::max(1, commandLineParser.getValueAsInt("reloadframe", 10)) });
+		}
+		if (const std::string reload2 = commandLineParser.getValueAsString("reload2", ""); !reload2.empty()) {
+			commandLineReloads.push_back({ reload2, std::max(1, commandLineParser.getValueAsInt("reload2frame", 20)) });
+		}
 		renderingPushConstants.vis_clusters = std::max(0, std::min(3, commandLineParser.getValueAsInt("visualize", 0)));
 		title = "Vulkanite: A dynamic LOD rendering pipeline";
 
@@ -3358,8 +3369,13 @@ public:
 
 		hwrDrawIndexedIndirect.firstIndex = 0;
 		hwrDrawIndexedIndirect.firstInstance = 0;
-		hwrDrawIndexedIndirect.indexCount = models.object.indexBuffer.size();
-		//drawIndexedIndirect.indexCount = naniteMesh.meshes[naniteMesh.meshes.size()-1].mesh.n_faces();
+		// Only an initializer. `draw()` zeroes `indexCount` before every frame and the culling
+		// shader owns the real indirect arguments (culling.comp binding 3, `NumVertices_hw`), so
+		// the value written here is never used for a draw - it is only read back by the overlay.
+		// It must still be a *sane* number, and `models.object.indexBuffer` is not one: a blob-only
+		// load (`--model bunny.fcc`) never parses a glTF, so that buffer is empty. The scene index
+		// buffer exists on both load paths.
+		hwrDrawIndexedIndirect.indexCount = scene.indices.count;
 		hwrDrawIndexedIndirect.instanceCount = 2;
 		hwrDrawIndexedIndirect.vertexOffset = 0;
 
@@ -4260,21 +4276,25 @@ public:
 	}
 
 	/*
-	* Non interactive counterpart of the file dialog: `--reload <file>` feeds the same
-	* `reloadModel` entry point, so the tests can verify that swapping the model at runtime keeps
-	* every descriptor, buffer and command buffer consistent.
+	* Non interactive counterpart of the file dialog: `--reload <file>` (and `--reload2`) feed the
+	* same `reloadModel` entry point, so the tests can verify that swapping the model at runtime
+	* keeps every descriptor, buffer and command buffer consistent. The requests are applied in
+	* frame order, at most one per frame, so two reloads cannot collapse into a single call.
 	*/
 	void handlePendingCommandLineReload()
 	{
-		if (reloadModelPath.empty() || reloadDone || framesRendered < static_cast<uint32_t>(reloadAtFrame)) {
-			return;
-		}
-		reloadDone = true;
-		try {
-			reloadModel(reloadModelPath);
-		}
-		catch (const std::exception& e) {
-			std::cerr << "[reload] failed: " << e.what() << std::endl;
+		for (auto& reload : commandLineReloads) {
+			if (reload.done || framesRendered < static_cast<uint32_t>(reload.atFrame)) {
+				continue;
+			}
+			reload.done = true;
+			try {
+				reloadModel(reload.path);
+			}
+			catch (const std::exception& e) {
+				std::cerr << "[reload] failed: " << e.what() << std::endl;
+			}
+			break;
 		}
 	}
 
@@ -4298,7 +4318,7 @@ public:
 			{ "nanite blobs", "*.fcc" },
 			{ "All files", "*.*" },
 		};
-		if (!vks::openFileDialog(picked, "Load model", filters, getAssetPath() + "models")) {
+		if (!vks::openFileDialog(picked, "Load model", filters, getAssetPath() + "models", window)) {
 			return;
 		}
 		try {

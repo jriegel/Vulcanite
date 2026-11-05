@@ -253,8 +253,14 @@ namespace vkglTF
 		vkglTF::Texture emptyTexture;
 		void createEmptyTexture(VkQueue transferQueue);
 	public:
-		vks::VulkanDevice* device;
-		VkDescriptorPool descriptorPool;
+		// Zero initialized, like `vertices`/`indices` below. Both teardown paths (`clear()` and
+		// `~Model()`) dereference `device` to reach `logicalDevice`, and a model that was never
+		// loaded has no device at all - the pbrtexture blob path (`--model bunny.fcc`) deliberately
+		// keeps `models.object` unloaded and still calls `clear()` on every reload. Left
+		// uninitialized that is a wild read, not a null check: it was the 0xc0000005 at
+		// `vkDestroyDescriptorPool` in the shipped Release build.
+		vks::VulkanDevice* device = nullptr;
+		VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
 
 		// Zero initialized: several owners (Mesh, Instance, NaniteScene, NaniteMesh) keep these
 		// inline and only ever assign them, so a reload path needs to be able to ask whether a

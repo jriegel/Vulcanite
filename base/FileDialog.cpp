@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <iostream>
+#include <mutex>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -9,7 +10,9 @@
 #endif
 #include <windows.h>
 #include <commdlg.h>
+#include <commctrl.h>
 #pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "comctl32.lib")
 #endif
 
 namespace
@@ -65,9 +68,20 @@ namespace
 #endif
 }
 
-bool vks::openFileDialog(std::string& outPath, const std::string& title, const std::vector<FileFilter>& filters, const std::string& initialDir)
+bool vks::openFileDialog(std::string& outPath, const std::string& title, const std::vector<FileFilter>& filters, const std::string& initialDir, void* ownerHwnd)
 {
 #if defined(_WIN32)
+	// The file dialog is a common control. Without InitCommonControlsEx the common control classes
+	// are never registered; the first dialog still opens (Vista+ falls back to the shell item
+	// dialog) and a second one faults inside Comctl32. Done once per process.
+	static std::once_flag commonControlsInitialized;
+	std::call_once(commonControlsInitialized, []() {
+		INITCOMMONCONTROLSEX icc{};
+		icc.dwSize = sizeof(icc);
+		icc.dwICC = ICC_WIN95_CLASSES | ICC_BAR_CLASSES;
+		InitCommonControlsEx(&icc);
+	});
+
 	// MAX_PATH is not enough for long paths, so over-allocate and let the dialog extend the buffer.
 	std::vector<wchar_t> pathBuffer(32768, L'\0');
 
@@ -78,7 +92,9 @@ bool vks::openFileDialog(std::string& outPath, const std::string& title, const s
 
 	OPENFILENAMEW ofn{};
 	ofn.lStructSize = sizeof(ofn);
-	ofn.hwndOwner = nullptr;
+	// A modal common dialog wants a real owner window to pump its messages through; the viewer
+	// passes its own HWND. Callers without one still work, the dialog simply gets no owner.
+	ofn.hwndOwner = static_cast<HWND>(ownerHwnd);
 	ofn.lpstrFilter = filterBlock.empty() ? nullptr : filterBlock.data();
 	ofn.lpstrCustomFilter = nullptr;
 	ofn.nMaxCustFilter = 0;
@@ -111,6 +127,7 @@ bool vks::openFileDialog(std::string& outPath, const std::string& title, const s
 	(void)title;
 	(void)filters;
 	(void)initialDir;
+	(void)ownerHwnd;
 	return false;
 #endif
 }

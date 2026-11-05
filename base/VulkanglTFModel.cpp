@@ -770,33 +770,20 @@ void vkglTF::Model::clear()
 	buffersBound = false;
 	path.clear();
 	dimensions = {};
+	// `clear()` is not idempotent without this: the pbrtexture reload path calls it once per
+	// reload on a model that may never have been loaded, and a stale device would make the next
+	// call teardown a model that does not exist anymore.
+	device = nullptr;
 }
 
 vkglTF::Model::~Model()
 {
-	vkDestroyBuffer(device->logicalDevice, vertices.buffer, nullptr);
-	vkFreeMemory(device->logicalDevice, vertices.memory, nullptr);
-	vkDestroyBuffer(device->logicalDevice, indices.buffer, nullptr);
-	vkFreeMemory(device->logicalDevice, indices.memory, nullptr);
-	for (auto texture : textures) {
-		texture.destroy();
-	}
-	for (auto node : nodes) {
-		delete node;
-	}
-    for (auto skin : skins) {
-        delete skin;
-    }
-	if (descriptorSetLayoutUbo != VK_NULL_HANDLE) {
-		vkDestroyDescriptorSetLayout(device->logicalDevice, descriptorSetLayoutUbo, nullptr);
-		descriptorSetLayoutUbo = VK_NULL_HANDLE;
-	}
-	if (descriptorSetLayoutImage != VK_NULL_HANDLE) {
-		vkDestroyDescriptorSetLayout(device->logicalDevice, descriptorSetLayoutImage, nullptr);
-		descriptorSetLayoutImage = VK_NULL_HANDLE;
-	}
-	vkDestroyDescriptorPool(device->logicalDevice, descriptorPool, nullptr);
-	emptyTexture.destroy();
+	// Deliberately *not* a separate teardown: it used to destroy the process wide
+	// `descriptorSetLayoutUbo`/`descriptorSetLayoutImage` globals, which invalidates the node and
+	// material descriptor sets of every other model still alive (`models.skybox`, `models.cube`
+	// outlive `models.object` in the pbrtexture viewer). Those layouts are destroyed with the
+	// device. `clear()` also carries the "never loaded" guard the destructor never had.
+	clear();
 }
 
 void vkglTF::Model::loadNode(vkglTF::Node *parent, const tinygltf::Node &node, uint32_t nodeIndex, const tinygltf::Model &model, std::vector<uint32_t>& indexBuffer, std::vector<Vertex>& vertexBuffer, float globalscale)

@@ -37,15 +37,18 @@ struct NaniteMesh {
 
 	/************ Load Mesh *************/
 	// Load from vkglTF
-	const vkglTF::Model * vkglTFModel;
-	const vkglTF::Mesh* vkglTFMesh;
+	// Initialized: the blob-only load path (`initNaniteInfoFromBlob`) never calls
+	// `loadvkglTFModel`, so on that path these are the *only* thing standing between a stray read
+	// and a wild pointer. `NaniteMesh` is also default-constructed and re-assigned on every reload.
+	const vkglTF::Model* vkglTFModel = nullptr;
+	const vkglTF::Mesh* vkglTFMesh = nullptr;
 	void setModelPath(const char* path) { filepath = path; };
 	void loadvkglTFModel(const vkglTF::Model& model);
 	void vkglTFMeshToOpenMesh(MyMesh& mymesh, const vkglTF::Mesh& mesh);
 	void vkglTFPrimitiveToOpenMesh(MyMesh& mymesh, const vkglTF::Primitive& prim);
 	// TODO: Load from tinygltf
-	const tinygltf::Model* tinyglTFModel;
-	const tinygltf::Mesh* tinyglTFMesh;
+	const tinygltf::Model* tinyglTFModel = nullptr;
+	const tinygltf::Mesh* tinyglTFMesh = nullptr;
 	void loadglTFModel(const tinygltf::Model& model); // TODO
 	void glTFMeshToOpenMesh(MyMesh& mymesh, const tinygltf::Mesh& mesh); // TODO
 
@@ -107,8 +110,8 @@ struct NaniteMesh {
 		3. cluster group (no need)
 	
 	*/
-	vks::VulkanDevice* device;
-	const vkglTF::Model * model;
+	vks::VulkanDevice* device = nullptr;
+	const vkglTF::Model* model = nullptr;
 	vkglTF::Model::Vertices vertices;
 	vkglTF::Model::Indices indices;
 	std::vector<uint32_t> indexBuffer;

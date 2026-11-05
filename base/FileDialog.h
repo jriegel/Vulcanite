@@ -23,8 +23,16 @@ namespace vks
 	* @param title Dialog caption
 	* @param filters Filter rows; empty means "every file"
 	* @param initialDir Directory the dialog opens in (optional)
+	* @param ownerHwnd Native window handle (HWND) that owns the dialog, Windows only. Pass the
+	*                  renderer's window: an owner-less common dialog has no parent to pump messages
+	*                  through, and opening it repeatedly faulted inside Comctl32.
 	* @return false if the user cancelled or no native dialog exists on this platform
 	* @note The process working directory is never changed, so relative asset paths keep working
 	*/
-	bool openFileDialog(std::string& outPath, const std::string& title, const std::vector<FileFilter>& filters = {}, const std::string& initialDir = std::string());
+	bool openFileDialog(
+		std::string& outPath,
+		const std::string& title,
+		const std::vector<FileFilter>& filters = {},
+		const std::string& initialDir = std::string(),
+		void* ownerHwnd = nullptr);
 }
