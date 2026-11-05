@@ -207,6 +207,9 @@ public:
 
 	int thresholdInt = 500;
 	double thresholdIntDiv = 1e6;
+	// Prints the rasterized triangle counters to stdout during `--capture`; those counters normally
+	// live in the ImGui overlay, which `--capture` disables.
+	bool reportRasterStats = false;
 
 	struct BVHTraversalPushConstants {
 		alignas(8) glm::vec2 screenSize;
@@ -319,6 +322,8 @@ public:
 		commandLineParser.add("reload2", { "--reload2" }, 1, "Second model to load at runtime - reloads twice, i.e. what pressing O twice would deliver");
 		commandLineParser.add("reload2frame", { "--reload2frame" }, 1, "Frame at which --reload2 is applied (default 20)");
 		commandLineParser.add("visualize", { "--visualize" }, 1, "Cluster visualization mode: 0 = shaded, 1 = LOD level, 2 = cluster/cluster group id, 3 = visibility buffer id");
+		commandLineParser.add("raster-stats", { "--raster-stats" }, false, "Print the rasterized triangle counts per frame to stdout (the overlay is off while capturing)");
+		commandLineParser.add("threshold", { "--threshold" }, 1, "Pin the LOD-selection threshold (same 0..1000 range as the ImGui slider; 0 keeps every cluster at LOD 0)");
 		commandLineParser.parse(args);
 		modelName = commandLineParser.getValueAsString("model", "dragon");
 		if (commandLineParser.isSet("nanite-blob")) {
@@ -337,6 +342,8 @@ public:
 			commandLineReloads.push_back({ reload2, std::max(1, commandLineParser.getValueAsInt("reload2frame", 20)) });
 		}
 		renderingPushConstants.vis_clusters = std::max(0, std::min(3, commandLineParser.getValueAsInt("visualize", 0)));
+		reportRasterStats = commandLineParser.isSet("raster-stats");
+		thresholdInt = std::max(0, std::min(1000, commandLineParser.getValueAsInt("threshold", thresholdInt)));
 		title = "Vulkanite: A dynamic LOD rendering pipeline";
 
 		camera.type = Camera::CameraType::firstperson;
@@ -3278,12 +3285,23 @@ public:
 			nullptr));
 	}
 
+	/*
+	* The four raster output buffers are written by `culling.comp` with an unbounded `atomicAdd`
+	* and no bounds check, so their size is a hard correctness limit, not a memory hint. The old
+	* `sceneIndicesCount / 8` silently assumed that LOD selection discards seven eighths of the
+	* scene; a blob with a single LOD has nothing to discard and overflows by 2.7x on `bunny`
+	* (288092 triangles emitted into 108034 index slots), which renders as scattered scraps.
+	* `sceneIndicesCount` is the exact upper bound: every cluster's `[triangleIndicesStart,
+	* triangleIndicesEnd)` range is disjoint inside the scene index buffer and every cluster is
+	* emitted at most once, and the hw/sw split means each buffer alone must be able to hold all
+	* of them.
+	*/
 	void createCullingBuffers()
 	{
 		VK_CHECK_RESULT(vulkanDevice->createBuffer(
 			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
 			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-			scene.sceneIndicesCount / 8 * sizeof(uint32_t),
+			scene.sceneIndicesCount * sizeof(uint32_t),
 			&HWRIndicesBuffer.buffer,
 			&HWRIndicesBuffer.memory,
 			nullptr));
@@ -3291,7 +3309,7 @@ public:
 		VK_CHECK_RESULT(vulkanDevice->createBuffer(
 			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
 			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-			scene.sceneIndicesCount / 8 / 3 * sizeof(glm::uvec3),
+			scene.sceneIndicesCount / 3 * sizeof(glm::uvec3),
 			&HWRIDBuffer.buffer,
 			&HWRIDBuffer.memory,
 			nullptr));
@@ -3299,7 +3317,7 @@ public:
 		VK_CHECK_RESULT(vulkanDevice->createBuffer(
 			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
 			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-			scene.sceneIndicesCount / 8 * sizeof(uint32_t),
+			scene.sceneIndicesCount * sizeof(uint32_t),
 			&SWRIndicesBuffer.buffer,
 			&SWRIndicesBuffer.memory,
 			nullptr));
@@ -3307,7 +3325,7 @@ public:
 		VK_CHECK_RESULT(vulkanDevice->createBuffer(
 			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
 			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-			scene.sceneIndicesCount / 8 / 3 * sizeof(glm::uvec3),
+			scene.sceneIndicesCount / 3 * sizeof(glm::uvec3),
 			&SWRIDBuffer.buffer,
 			&SWRIDBuffer.memory,
 			nullptr));
@@ -3985,9 +4003,40 @@ public:
 		memcpy(uniformBuffers.params.mapped, &uboParams, sizeof(uboParams));
 	}
 
+	/*
+	* The rasterized triangle counters live in `OnUpdateUIOverlay`, and `--capture` disables the
+	* overlay - so a headless run has no way to see whether the cull shaders overflowed the raster
+	* output buffers. `culling.comp` reserves a slot with an unbounded `atomicAdd` and then writes,
+	* so the counters below are the only way to compare what was emitted against the capacity of
+	* `HWRIndicesBuffer`/`SWRIndicesBuffer` (each `sceneIndicesCount` wide, see
+	* `createCullingBuffers`). Reading the mapped host-visible counters *before* `draw()` resets
+	* them is race free: the previous frame was idle'd, and this frame's work has not been
+	* submitted yet.
+	*/
+	void printRasterStatsHeadless()
+	{
+		if (!capture.active || !hwrDrawIndexedIndirectBuffer.mapped || !swrNumVerticesBuffer.mapped) {
+			return;
+		}
+		DrawIndexedIndirect hw{};
+		memcpy(&hw, hwrDrawIndexedIndirectBuffer.mapped, sizeof(DrawIndexedIndirect));
+		uint32_t swVerts = 0;
+		memcpy(&swVerts, swrNumVerticesBuffer.mapped, sizeof(uint32_t));
+		std::cout << "[raster] frame " << framesRendered
+		          << " scene indices " << scene.sceneIndicesCount
+		          << " raster slots per path " << scene.sceneIndicesCount
+		          << " hw tris " << (hw.indexCount / 3)
+		          << " sw tris " << (swVerts / 3)
+		          << " total tris " << ((swVerts + hw.indexCount) / 3) << std::endl;
+	}
+
 	void draw()
 	{
 		VulkanExampleBase::prepareFrame();
+
+		if (reportRasterStats) {
+			printRasterStatsHeadless();
+		}
 
 		if (hwrDrawIndexedIndirectBuffer.mapped)
 		{

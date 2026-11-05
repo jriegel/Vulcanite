@@ -105,13 +105,14 @@ public:
 		std::string value = options[name].value;
 		if (value != "") {
 			char* numConvPtr;
-			int32_t intVal = strtol(value.c_str(), &numConvPtr, 10);
-			return (intVal > 0) ? intVal : defaultValue;
+			const int32_t intVal = static_cast<int32_t>(strtol(value.c_str(), &numConvPtr, 10));
+			// A parsed value is a parsed value: `0` and negative numbers are meaningful (e.g.
+			// `--threshold 0`), so only a value that did not parse at all falls back.
+			return (numConvPtr != value.c_str()) ? intVal : defaultValue;
 		}
 		else {
 			return defaultValue;
 		}
-		return int32_t();
 	}
 
 };
