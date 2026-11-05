@@ -8,7 +8,9 @@ verified against the tree, not guessed. When you find something wrong, update th
 Vulkan C++17 renderer implementing a Nanite-style cluster/LOD pipeline. The example base is
 derived from Sascha Willems' Vulkan examples (`base/`), the Nanite pipeline lives in `mesh/`,
 the viewer is `examples/pbrtexture/pbrtexture.cpp` (~4000 lines, the only example that uses the
-mesh library), and `tools/nanite_bake/` is the headless asset-pipeline front end of the builder.
+mesh library), `tools/nanite_bake/` is the headless asset-pipeline front end of the builder, and
+`rust/` is a parallel Rust implementation of that asset pipeline (`nanite-bake-rs`) writing the
+same `.fcc` format. The C++ builder stays in place; see *Rust asset pipeline*.
 
 Pipeline: glTF -> `vkglTF::Model` -> OpenMesh `MyMesh` per LOD -> clusters (56 tris) ->
 cluster groups (15) -> QEM edge-collapse (boundary halfedges locked) -> re-cluster, 6 LODs ->
@@ -32,6 +34,15 @@ cmake --build build --config Release
 Executables land in `build/bin/Release/` (`pbrtexture.exe`, `nanite_bake.exe`, `imagecompare.exe`)
 and `build/bin/Debug/`.
 
+The Rust workspace is built by cargo, not CMake, and is not part of `ALL_BUILD`:
+
+```
+cargo build --release -p nanite-bake-rs    # from rust/
+```
+
+It lands in `rust/target/release/nanite-bake-rs.exe`; test 14 uses it and is `DISABLED` when that
+file is missing. Toolchain as of writing: `cargo 1.97.1`.
+
 **Do not use the CMake Tools extension tools here**: `ListBuildTargets` and `ListTests`
 return empty for this project even though the solution builds fine. Use the terminal.
 
@@ -41,11 +52,11 @@ return empty for this project even though the solution builds fine. Use the term
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Fourteen tests, all green as of writing (`render_pbrtexture_fresh`, `render_pbrtexture_cached`,
+Fifteen tests, all green as of writing (`render_pbrtexture_fresh`, `render_pbrtexture_cached`,
 `render_pbrtexture_blob`, `render_pbrtexture_reload`, `render_pbrtexture_reload_swap`,
 `render_pbrtexture_baked_by_tool`, `nanite_bake_verify`, `render_pbrtexture_blob_only`,
 `render_pbrtexture_vis1..3`, `render_pbrtexture_vis_modes_differ`,
-`render_pbrtexture_blob_reload_twice`, `imagecompare_selftest`). The
+`render_pbrtexture_blob_reload_twice`, `render_pbrtexture_rust_blob`, `imagecompare_selftest`). The
 render tests are `RUN_SERIAL` with a fixture chain: *fresh* builds the caches, everything else
 reuses them.
 
@@ -101,6 +112,20 @@ reuses them.
   ignored `--visualize` would render the shaded image four times, every vis golden would be a copy
   of the shaded one, and tests 1–11 would all stay green. Verified: feeding it two identical images
   fails with "Images are identical but must differ".
+- **`tests/RunRustBlobTest.cmake` (`render_pbrtexture_rust_blob`) is the Rust pipeline smoke test.**
+  It runs `nanite-bake-rs --rebuild --out assets/models/bunny_rs.fcc assets/models/bunny.gltf`,
+  re-reads that blob with `--verify` in a *separate* process, then renders `--model bunny_rs.fcc
+  --nanite-blob` in the C++ viewer. `--out` is mandatory: baking over `bunny.fcc` would silently
+  replace the C++ builder's output that tests 3/8/13 compare against. Two comparisons, because the
+  Rust builder emits **one LOD** (no OpenMesh decimation, no METIS collapse order to reproduce) and
+  therefore always draws LOD 0 at full detail while the C++ blob draws a mix of levels:
+  1. default render vs the golden image at imagecompare's defaults — measured `0.93` mean abs diff /
+     `1.91%` bad, i.e. inside the tolerance but nowhere near bit-exact, and that is expected.
+  2. `--threshold 0` on **both** blobs, which pins the C++ blob to LOD 0 too, so both draw the same
+     triangles — measured `0.26` / `0.52%` bad. This is the comparison that catches a wrong cluster,
+     a wrong index range or a wrong AABB instead of only "roughly the same silhouette".
+  `NANITE_BAKE_RS_EXE` is a cache variable pointing at the cargo output; the test is marked `DISABLED`
+  when the file does not exist, so a C++-only checkout still passes 15/15.
 - Re-baseline the golden image with `$env:VULCANITE_UPDATE_GOLDEN = "1"` before ctest. That env var
   only helps once a golden exists: the vis tests declare `REQUIRED_FILES` on their golden, so a
   missing one is reported as `***Not Run`, not as a failure to record. Bootstrap a new golden by
@@ -139,6 +164,25 @@ Gotchas that cost real debugging time:
 - In PowerShell, `"$PWD/x"` inside a *double-quoted cmake argument* is not expanded the way you
   expect once the argument itself is quoted — a `cmake -DOUT=$PWD/...` bootstrap run silently
   created a literal `./$PWD/` directory in the repo root. Pass absolute paths.
+- **The raster output buffers are a correctness limit, not a memory hint.** `culling.comp` reserves
+  a slot with an unbounded `atomicAdd` and then writes — there is **no bounds check anywhere** — so
+  `HWRIndicesBuffer`/`SWRIndicesBuffer` (and the two `…IDBuffer`s) must be able to hold everything the
+  cull shaders can emit. They used to be `sceneIndicesCount / 8`, which silently assumes LOD selection
+  discards seven eighths of the scene. A single-LOD blob has nothing to discard: `bunny` emitted
+  288,092 triangles into 108,034 slots (**2.7× overflow**) and rendered as scattered scraps — no
+  validation layer complained, because the writes land inside the next allocation. They are now
+  `sceneIndicesCount` (and `sceneIndicesCount / 3` `uvec3`s), which is the *exact* upper bound:
+  cluster triangle ranges are disjoint inside the scene index buffer and every cluster is emitted at
+  most once, but the hw/sw split means each buffer alone needs full capacity. Measured after the fix:
+  Rust blob `286,664 hw + 410 sw = 287,074` tris of 288,092 possible; C++ blob `54,416`.
+  `--raster-stats` prints those counters (`[raster] frame N …`) during `--capture`, when the overlay
+  that normally shows them is off — that is how the overflow was found.
+- **`--threshold 0` used to be impossible.** `base/CommandLineParser.hpp::getValueAsInt` returned the
+  default whenever the parsed value was `<= 0` (`return (intVal > 0) ? intVal : defaultValue;`). It now
+  only falls back when nothing parsed at all (`numConvPtr != value.c_str()`), so `0` and negatives
+  work. Checked all 13 call sites — the base ones (`--width`, `--height`, `--captureframes`, …) never
+  receive `0` from a test. `--threshold <0..1000>` pins the LOD selector; `0` keeps every LOD 0 cluster,
+  which is how a single-LOD render is compared against a multi-LOD one.
 - Known pre-existing builder bug: `--model teapot` / `--model sphere` dies with an access
   violation (`0xC0000005`) at the end of `NaniteMesh::generateNaniteInfo` — small meshes reach
   `clusterGroupNum == 1`, so the last LODs are identical copies. Reproduced at HEAD with a
@@ -218,6 +262,63 @@ shipped, and opened by a viewer that never ran the builder.
   and assembles the scene — `loadAssets()` and `reloadModel()` both call it, so the two paths
   cannot drift apart. A blob that fails to load throws `std::runtime_error`; the reload call sites
   catch it, `loadAssets()` does not.
+
+## Rust asset pipeline
+
+`rust/` is a second, independent implementation of the *asset* half of the pipeline: glTF in,
+`<model>.fcc` out. No Vulkan, no OpenMesh, no METIS, no CMake. The C++ builder is untouched and is
+still what tests 1–13 use; `nanite-bake-rs` is not a replacement for it, it is a parallel producer of
+the same contract. Workspace: `nanite-blob` (format) + `nanite-bake-rs` (builder + CLI),
+`resolver = "2"`, deps pinned in `[workspace.dependencies]` (anyhow, bytemuck, clap, glam 0.29,
+gltf 1.4 with `extras`, indicatif, thiserror 2, tracing, tracing-subscriber).
+
+- `rust/nanite-blob/` is the format crate and the mirror of `mesh/NaniteBlob.{h,cpp}`. Encoding and
+  decoding are **hand-rolled little-endian POD**, deliberately *not* `#[repr(C)]` + bytemuck: the C++
+  structs have `alignas` padding that a Rust `repr(C)` mirror would lay out differently (the trailing
+  `ErrorInfo` pad is the trap). Every offset is pinned by a test — `header_offsets`,
+  `blob_bvh_node_offsets`, `cluster_info_offsets`, `error_info_offsets`, `vertex_offsets`,
+  `struct_sizes_match_the_c_abi` — plus `config_hash_matches_the_c_builder`
+  (`14_829_784_758_405_755_283`) and `fnv1a_matches_the_reference_vectors`. Two tests read the real
+  `assets/models/bunny.fcc`: `reads_the_cpp_baked_blob` and `rewriting_the_cpp_blob_is_lossless`
+  (re-encoding it must produce byte-identical output). If you change the format, change the C++
+  version constant *and* these tests together.
+- `rust/nanite-bake-rs/` reproduces the builder invariants the viewer actually depends on:
+  `grow_regions` (a single-FIFO wavefront region grower) stands in for METIS k-way, and
+  `bounding_sphere` / `build_tree` / `update_error_core` / `flatten` are faithful ports of
+  `Mesh::getBoundingSphere`, `Mesh::buildBVH`, `Mesh::updateBVHError` and `NaniteMesh::flattenBVH` —
+  including the quirks (the growing sphere never moves its centre; a non-leaf AABB merge walks
+  `clusterGroups[start..end]` by *direct* index while the sort happens on a permutation; a non-leaf
+  keeps `start = end = -1`).
+- **It emits one LOD, not six.** There is no OpenMesh QEM decimation to port, so `lodNums = 1`,
+  `normalized_lod_error = 0` and `parentError = LAST_LOD_PARENT_ERROR` (`1e5`). That is legal for the
+  format and safe for the viewer **only** because the raster buffers were resized (see the gotcha
+  above) — a single-LOD blob draws every triangle of the model. Consequence: `--visualize 1` shows the
+  Rust render entirely red (LOD 0) where the golden is blue/yellow, and the triangle counts differ by
+  ~5×. Do not "fix" that by leaving `errorWorld` at its C++ defaults (`-1` / `-FLT_MAX`): the selector
+  then culls *everything* and the render is empty.
+- `check_asset()` in `emit.rs` is the pre-write gate: it re-checks the viewer's hard asserts
+  (`triangleIndicesEnd <= indexCount/3`, `start < end`, `<= CLUSTER_MAX_SIZE` triangles per cluster,
+  non-inverted AABBs, `sorted_cluster_indices` covering every cluster exactly once, LEAF `start < end`,
+  NODE `start == end`) **plus** a world-space LOD gate — every cluster needs
+  `errorWorld.x <= RENDER_THRESHOLD < errorWorld.y`, because `culling.comp` keeps a cluster only when
+  `errorData.x <= threshold && errorData.y > threshold`. The shader multiplies the world error by
+  `getScreenBoundRadiusSq` (a *pixel-count squared* factor, `error.comp:50`), so this is a necessary
+  bound, not the exact test; it is what catches the default-`errorWorld` failure mode that passes
+  every structural check and then renders as scraps. `--no-check` skips it.
+- `canonical()` in `emit.rs` is a **lexical** normalisation, not `std::fs::canonicalize`: the latter
+  returns a `\\?\C:\...` prefix on Windows, which would make the stored `sourcePath` differ from the
+  C++ `weakly_canonical` result and break byte-identical output.
+- CLI: `nanite-bake-rs [--rebuild] [--out <path>] [--verify] [--dump] [--no-check] [--log <level>]
+  <model.gltf>…`. `--verify` re-reads a blob in a *separate* process and asserts the five struct
+  sizes against the C++ ABI, bailing on any mismatch. **Always pass `--out` when baking a Rust blob
+  next to a C++ one** — the default is `blob_path_for(input)`, i.e. it would overwrite `<model>.fcc`,
+  which is the reference image for tests 3/8/13. The test suite uses `bunny_rs.fcc`.
+- Measured on `bunny`: Rust bake **0.1 s** / 10,119,216 B (1 LOD, 2575 clusters, 260 BVH nodes);
+  C++ bake ~8 s / 20,068,144 B (6 LODs, 15450 clusters). Rendered through the C++ viewer at the
+  default threshold: mean abs diff `0.71`–`0.93`, `1.3–1.9%` bad pixels against the golden. Pinning
+  both blobs to LOD 0 (`--threshold 0`) narrows that to `0.26` / `0.52%`, which is the residual from
+  the different cluster partition — bit equality would require porting OpenMesh's decimation order
+  and METIS, and is not the goal.
 
 ## Camera and "View all"
 
@@ -364,7 +465,9 @@ order, at most one per frame, so two reloads cannot collapse into a single call.
 - Formatting follows the file: tabs in `pbrtexture.cpp` and `NaniteMesh.cpp`, 4 spaces in
   `NaniteScene.cpp`. Don't reformat surrounding code.
 - `base/CommandLineParser.hpp` has `add/isSet/getValueAsString/getValueAsInt` — there is **no**
-  `getValueAsBool`; flags are `hasValue=false` + `isSet`.
+  `getValueAsBool`; flags are `hasValue=false` + `isSet`. `getValueAsInt` returns the parsed value
+  even when it is `0` or negative (it only falls back to the default if nothing parsed), which is what
+  makes `--threshold 0` work — do not reintroduce an `> 0` guard.
 - `VulkanExampleBase` has no reload/restart hook. Available virtuals: `render`, `viewChanged`,
   `keyPressed`, `mouseMoved`, `windowResized`, `buildCommandBuffers`, `setupDepthStencil`,
   `setupFrameBuffer`, `setupRenderPass`, `getEnabledFeatures`,
@@ -398,4 +501,8 @@ order, at most one per frame, so two reloads cannot collapse into a single call.
   `cachePathFor`/`blobPathFor`/`isBlobPath`), `mesh/Mesh.cpp` (clustering, BVH),
   `tools/nanite_bake/nanite_bake.cpp` (headless front end of the same builder).
 - Scene assembly: `mesh/NaniteScene.cpp` (`createNaniteSceneInfo` and its blob/legacy branches).
+- Rust asset pipeline: `rust/nanite-blob/src/lib.rs` (format: header, section table, POD encode/
+decode, `fnv1a`, `config_hash`, `read`/`write`) and `rust/nanite-blob/src/tests.rs` (the ABI pins);
+`rust/nanite-bake-rs/src/{gltf_load,cluster,bvh,emit,main}.rs` (glTF -> `LodMesh` -> clusters ->
+BVH -> `Asset` -> `.fcc`, and the CLI). See *Rust asset pipeline*.
 - Base framework: `base/vulkanexamplebase.{h,cpp}`, `base/VulkanUIOverlay.{h,cpp}`.

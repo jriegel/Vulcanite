@@ -1,0 +1,13 @@
+[package]
+name = "nanite-blob"
+description = "Reader/writer for the Vulcanite Nanite cluster blob (.fcc) asset format."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = "2"
+
+[dev-dependencies]

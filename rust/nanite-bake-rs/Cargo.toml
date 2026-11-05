@@ -1,0 +1,24 @@
+[package]
+name = "nanite-bake-rs"
+description = "Headless Rust asset pipeline: glTF -> Nanite cluster blob (.fcc)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nanite-bake-rs"
+path = "src/main.rs"
+
+[dependencies]
+nanite-blob = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+glam = { workspace = true }
+gltf = { workspace = true }
+indicatif = { workspace = true }
+thiserror = "2"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
