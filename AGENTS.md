@@ -9,8 +9,9 @@ Vulkan C++17 renderer implementing a Nanite-style cluster/LOD pipeline. The exam
 derived from Sascha Willems' Vulkan examples (`base/`), the Nanite pipeline lives in `mesh/`,
 the viewer is `examples/pbrtexture/pbrtexture.cpp` (~4000 lines, the only example that uses the
 mesh library), `tools/nanite_bake/` is the headless asset-pipeline front end of the builder, and
-`rust/` is a parallel Rust implementation of that asset pipeline (`nanite-bake-rs`) writing the
-same `.fcc` format. The C++ builder stays in place; see *Rust asset pipeline*.
+`rust/` is a parallel Rust implementation of the whole pipeline: `nanite-bake-rs` writes the same
+`.fcc` format (see *Rust asset pipeline*) and `nanite-viewer-rs` re-does the viewer on
+wgpu + WGSL + egui (see *Rust viewer*). The C++ builder and viewer stay in place.
 
 Pipeline: glTF -> `vkglTF::Model` -> OpenMesh `MyMesh` per LOD -> clusters (56 tris) ->
 cluster groups (15) -> QEM edge-collapse (boundary halfedges locked) -> re-cluster, 6 LODs ->
@@ -38,10 +39,15 @@ The Rust workspace is built by cargo, not CMake, and is not part of `ALL_BUILD`:
 
 ```
 cargo build --release -p nanite-bake-rs    # from rust/
+cargo build -p nanite-viewer-rs            # from rust/
 ```
 
-It lands in `rust/target/release/nanite-bake-rs.exe`; test 14 uses it and is `DISABLED` when that
-file is missing. Toolchain as of writing: `cargo 1.97.1`.
+`nanite-bake-rs` lands in `rust/target/release/nanite-bake-rs.exe`; test 14 uses it and is `DISABLED`
+when that file is missing. `nanite-viewer-rs` lands in `rust/target/debug/nanite-viewer-rs.exe`
+(tests 15–21 point at the **debug** exe on purpose — a release build takes minutes and the capture
+time is not what they assert), and those are `DISABLED` when it is missing. Toolchain as of writing:
+`cargo 1.97.1`. **`nanite-viewer-rs` embeds its WGSL with `include_str!`, so any `.wgsl` edit needs a
+`cargo build` before the exe reflects it.**
 
 **Do not use the CMake Tools extension tools here**: `ListBuildTargets` and `ListTests`
 return empty for this project even though the solution builds fine. Use the terminal.
@@ -52,13 +58,15 @@ return empty for this project even though the solution builds fine. Use the term
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Fifteen tests, all green as of writing (`render_pbrtexture_fresh`, `render_pbrtexture_cached`,
+Twenty-two tests, all green as of writing (`render_pbrtexture_fresh`, `render_pbrtexture_cached`,
 `render_pbrtexture_blob`, `render_pbrtexture_reload`, `render_pbrtexture_reload_swap`,
 `render_pbrtexture_baked_by_tool`, `nanite_bake_verify`, `render_pbrtexture_blob_only`,
 `render_pbrtexture_vis1..3`, `render_pbrtexture_vis_modes_differ`,
-`render_pbrtexture_blob_reload_twice`, `render_pbrtexture_rust_blob`, `imagecompare_selftest`). The
+`render_pbrtexture_blob_reload_twice`, `render_pbrtexture_rust_blob`,
+`render_rust_viewer_bunny`, `render_rust_viewer_vis1..3`, `render_rust_viewer_blob_only`,
+`render_rust_viewer_blob_reload_twice`, `render_rust_viewer_datasets`, `imagecompare_selftest`). The
 render tests are `RUN_SERIAL` with a fixture chain: *fresh* builds the caches, everything else
-reuses them.
+reuses them. Tests 15–21 drive the **Rust** viewer — see *Rust viewer*.
 
 - `tests/RunRenderTest.cmake` parameters: `RENDER_EXE`, `COMPARE_EXE`, `MODEL`, `OUT`,
   `REFERENCE` (required), `ASSETS_DIR`, `FRAMES` (default 10), `CLEAN_CACHE`, `BAKE_EXE`,
@@ -189,7 +197,13 @@ Gotchas that cost real debugging time:
   `git stash`, so it is not a regression. Nothing is cached in that case (`serialize` never runs),
   which is why `--nanite-blob` then asserts "no blob cache exists". `--model voyager` crashes the
   same way (exit 1 right after "LOD 0 generated"), also pre-existing and unrelated to the viewer.
-  Safe models to bake: `bunny`, `venus`, `dragon`, `nanite_test*`.
+  **`nanite_test` crashes the same way and is *not* safe to bake** (measured: both
+  `pbrtexture --model nanite_test` and `nanite_bake --rebuild assets/models/nanite_test.gltf` exit
+  `-1073741819` = `0xC0000005` right after "LOD 3 generated"), so it has no `.fcc`, no JSON cache and
+  no C++ reference image — `nanite_test_plane` (a different mesh, 4232 tris) bakes fine. The Rust
+  builder handles `nanite_test` without complaint (4232 tris / 76 clusters), which is why
+  `render_rust_viewer_datasets` asserts scene counters instead of pixels for it.
+  Safe models to bake: `bunny`, `venus`, `dragon`, `nanite_test_plane`.
 
 ## The two-stage asset pipeline
 
@@ -319,6 +333,106 @@ gltf 1.4 with `extras`, indicatif, thiserror 2, tracing, tracing-subscriber).
   both blobs to LOD 0 (`--threshold 0`) narrows that to `0.26` / `0.52%`, which is the residual from
   the different cluster partition — bit equality would require porting OpenMesh's decimation order
   and METIS, and is not the goal.
+
+## Rust viewer
+
+`rust/nanite-viewer-rs` is a second, independent implementation of the *viewer*: `pbrtexture`
+re-done on **wgpu 30** + **WGSL** + **egui 0.36** (winit 0.30, egui-winit/egui-wgpu 0.36.2,
+rfd 0.17 for the open dialog). It shares no renderer code with the C++ example — only the `.fcc`
+format, the GPU struct ABI and the WGSL ports of the GLSL shaders. It renders the same images:
+measured against the four C++ goldens at 1920×1080, mean abs diff `0.0077` (shaded) / `0.0221`
+(vis1) / `0.0087` (vis2) / `0.0055` (vis3), ~0.013 % bad pixels.
+
+```
+cargo build -p nanite-viewer-rs                              # from rust/  -> debug exe
+cargo test  --manifest-path rust/Cargo.toml -p nanite-viewer-rs --lib   # 73 tests
+rust\target\debug\nanite-viewer-rs.exe --model bunny --capture out.png --captureframes 10
+```
+
+Flags mirror `pbrtexture` one for one (`--model`, `--nanite-blob`/`--nanite-json`/`--nanite-rebuild`,
+`--reload`/`--reloadframe`, `--reload2`/`--reload2frame`, `--visualize`, `--threshold`,
+`--raster-stats`, `--capture`, `--captureframes`, `--width`, `--height`) plus `--log <level>`.
+`Args::parse` is **hand-written, not clap** — deliberately, because the C++ parser is
+positional-tolerant and clap would reject argument orders the tests already use. Keys: `WASD`,
+`V` = view all, `O` = open dialog, `Esc` = quit; mouse drag matches
+`vulkanexamplebase.cpp` (`dx = previous_x - current_x`, left = rotate, right = dolly, middle = pan).
+
+Layout (`src/`): `main.rs` (CLI + tracing), `app.rs` (winit `ApplicationHandler`, surface, overlay,
+input, reload queue), `renderer.rs` (pipelines, bind groups, the whole frame graph), `scene.rs`
+(`.fcc`/baked asset → GPU-ready arrays), `load.rs` (model resolution, blob vs in-process bake,
+`view_all`), `camera.rs`, `env.rs` (irradiance/prefilter/BRDF generators), `ktx.rs`, `capture.rs`
+(offscreen readback → PNG), `abi.rs`, `shaders.rs`, and `shaders/*.wgsl` (14 stages + `common.wgsl`).
+
+- **`shaders.rs` prepends `common.wgsl` to every stage**, so a WGSL module is `COMMON + '\n' + stage`
+  and each file declares only its own entry points. The test `every_module_is_valid_wgsl` parses
+  **and validates** each concatenation with naga (`wgpu::naga`) and the same capability set the
+  device requests — parsing alone would miss type errors. `include_str!` means **a `.wgsl` edit
+  requires `cargo build` before the exe changes**; this has cost real debugging time twice.
+- **wgpu's Vulkan backend flips the viewport.** `wgpu-hal-30.0.1/src/vulkan/command.rs:1009` emits
+  `vk::Viewport { y: y + h, height: -h }`, so NDC y = +1 lands on framebuffer row 0 — the *opposite*
+  of the raw-Vulkan example, where `VulkanInitializers.hpp::viewport()` assigns a positive height
+  and NDC y = −1 is row 0. A port must therefore **negate `projection[1][1]`**
+  (`camera::flip_projection_y`, also applied to the cube-face projection in `env::cube_projection()`)
+  **and mirror every compute-side NDC→pixel conversion** (`windowFromNdc` in `common.wgsl`, used by
+  `getScreenAABB`). `getScreenBoundRadiusSq` is deliberately *not* mirrored — it returns a squared
+  distance, so the sign cancels. Get this wrong and the image is upside down (fix one half only and
+  the geometry is correct but the software rasterizer is mirrored).
+- **`@interpolate(flat)` must mirror the GLSL `flat` qualifiers exactly — in both directions.**
+  `hwrasterize.frag` has `in flat uint outID`, so `hwrasterize.wgsl` keeps `@interpolate(flat)`.
+  `filtercube.vert`/`irradiancecube.frag`/`prefilterenvmap.frag` have **no** `flat` anywhere, and
+  perspective-correct interpolation of the *position* vector is exactly what produces the per-pixel
+  cube-face direction (same trick as `skybox.vert`). Adding `flat` there collapses the whole IBL
+  convolution to a handful of corner directions: the tell is a **hue** error (warm gold vs cold blue,
+  signed ΔR +12 ΔG +15 ΔB +17 on the model with the sky bit-identical), not a brightness error.
+- **wgpu API traps found the hard way** (wgpu 30.0.1): `Device` has **no** `create_render_pass` —
+  it is on the `CommandEncoder`; `request_adapter` returns `Result<…>`, not `Option`;
+  `RenderPassColorAttachment` has a `depth_slice` field; `Surface` is not `Clone` and
+  `SurfaceConfiguration` is not `Copy`; `configure_surface` panics while a `SurfaceTexture` is alive;
+  `PipelineLayoutDescriptor.bind_group_layouts` is `&[Option<&BindGroupLayout>]` and a
+  hand-written bind group layout needs an explicit `layout: Some(&…)` on the pipeline (used for the
+  HiZ compute pass, everything else uses `layout: None`); `DepthStencilState` takes
+  `depth_write_enabled: Option<bool>` / `depth_compare: Option<…>`, and "depth off" still has to
+  *name* the format; `set_pipeline` must precede `set_immediates`.
+- **naga/WGSL traps**: no 64-bit integer literals (the 64-bit visibility buffer ids are built with
+  `u64(...)` shifts of `u32`s), no implicit scalar conversion inside composite constructors,
+  `u64 & u32` is a hard error, `var<immediate>` globals must carry **no** `@group/@binding`,
+  `@builtin(primitive_index)` is fragment/hit-shader only (the HW-raster vertex stage derives object
+  ids from `vertex_index`), and **`textureLoad` mip levels are not clamped** the way Vulkan's
+  `textureLod` clamps to the sampler's `maxLod` — an out-of-range level reads zeroes.
+- Required device features: `IMMEDIATES`, `SHADER_INT64`, `SHADER_INT64_ATOMIC_MIN_MAX`,
+  `TEXTURE_INT64_ATOMIC`, `TEXTURE_ATOMIC`. Texture→buffer readback needs
+  `bytes_per_row % 256 == 0` (`capture.rs::unpad_rows` undoes it); the C++ capture has no padding,
+  so both PNGs are directly comparable row for row (row 0 = framebuffer y = 0).
+- **egui**: the egui-wgpu renderer defaults to `depth_stencil_format: None`, so the egui render pass
+  must have **no depth attachment** and must use `LoadOp::Load` on colour — attaching the depth
+  buffer or clearing colour breaks it. `--capture` disables the overlay exactly like the C++
+  `settings.overlay = ... && !capture.active`, and the capture path renders into an offscreen
+  `Rgba8Unorm` target instead of the surface (`capture.rs`), which is why captures are
+  resolution-stable and surface-format-independent.
+- **wgpu zero-fills new textures; the C++ example leaves the HiZ undefined.** Rust therefore culls
+  *more* than C++ at the same threshold (measured 25 223 vs 33 594 triangles for `bunny` at 640×512)
+  while producing the same image. Do not "fix" this by initialising the HiZ to a large value — the
+  difference is invisible and the C++ behaviour is an uninitialised-memory accident.
+- `vis_topView` (the C++ ¼-size second pass) is **not ported**; its checkbox is inert.
+  `vis_clusters_level` is inert in C++ too.
+- `env.rs` substitutes a procedural cube for `assets/models/cube.gltf` (same 24 verts / 36 indices,
+  node quaternion `(0.7071068,0,0,0.7071067)` then the `FlipY` `y` negation), and
+  `ktx.rs` reads `assets/textures/hdr/gcanyon_cube.ktx` (KTX1, R16G16B16A16_SFLOAT, 1024², 11 mips).
+  The prefilter generator reproduces the C++ scheme exactly: **each mip is rendered independently**
+  at `dim * 2^-mip` and copied into cube mip `m` — it is *not* a blit mip chain — with
+  `roughness = mip / (mip_count(512) - 1)`. The BRDF LUT is sampled as `brdf(uv.x, 1.0 - uv.y)`.
+- `nanite_test` has **no C++ reference image** because the C++ builder crashes on it (see the
+  builder-bug gotcha), so `render_rust_viewer_datasets` asserts `[scene] … N triangles, M clusters`
+  counters instead of pixels for it. Under `Auto` the Rust viewer prefers a sibling `.fcc`, so
+  `dragon` and `nanite_test` are the two datasets that go through the **in-process** Rust baker.
+- Measured Rust scene counters / framing (`[view all] …`): `bunny.fcc` 283110 tris / 5212 clusters,
+  center (−0.149, −0.831, 1.557) r 2.392 d 5.501 near 2.870 far 16 — identical to C++;
+  `venus` 117242 / 2160, r 2.192 d 5.043; `dragon` (baked) 871414 / 15703, r 3.138 d 7.218;
+  `nanite_test` (baked) 4232 / 76; `nanite_test_plane` 4232 / 2116; `bunny_rs.fcc` 144046 / 2575.
+  Dataset diffs vs the C++ viewer at 640×512: `bunny.fcc` 0.1028, `bunny_rs.fcc` 0.4639,
+  `venus` 0.0999, `dragon` 1.1087, `nanite_test_plane` 0.4397 — all inside imagecompare's defaults.
+  `--model bunny.fcc` vs `--model bunny` in the Rust viewer is **bit-identical** (0.0000 / 0 % bad),
+  which is what tests 19–20 pin.
 
 ## Camera and "View all"
 
@@ -505,4 +619,10 @@ order, at most one per frame, so two reloads cannot collapse into a single call.
 decode, `fnv1a`, `config_hash`, `read`/`write`) and `rust/nanite-blob/src/tests.rs` (the ABI pins);
 `rust/nanite-bake-rs/src/{gltf_load,cluster,bvh,emit,main}.rs` (glTF -> `LodMesh` -> clusters ->
 BVH -> `Asset` -> `.fcc`, and the CLI). See *Rust asset pipeline*.
+- Rust viewer: `rust/nanite-viewer-rs/src/renderer.rs` (every pipeline, bind group and the frame
+graph — `render()` is the frame order), `src/app.rs` (winit event loop, `Args`, overlay, reload
+queue), `src/load.rs` (`resolve_model_path`, blob vs in-process bake, `view_all`), `src/scene.rs`
+(payload → GPU arrays), `src/env.rs` (irradiance/prefilter/BRDF), `src/capture.rs`, `src/abi.rs`
+(the struct-size table above, as constants + encoders), and `shaders/*.wgsl` with `shaders.rs`
+(see *Rust viewer*).
 - Base framework: `base/vulkanexamplebase.{h,cpp}`, `base/VulkanUIOverlay.{h,cpp}`.

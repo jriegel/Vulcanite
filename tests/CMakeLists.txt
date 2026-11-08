@@ -199,6 +199,105 @@ if(NOT EXISTS "${NANITE_BAKE_RS_EXE}")
     set_tests_properties(render_pbrtexture_rust_blob PROPERTIES DISABLED TRUE)
 endif()
 
+# 15-20. The **Rust** viewer (`rust/nanite-viewer-rs`): a wgpu/WGSL/egui re-implementation of
+#      `pbrtexture` that shares nothing with the C++ renderer but the `.fcc` format and the WGSL
+#      ports of the GLSL shaders. It is built by cargo, not CMake, so its path is a cache variable
+#      and a missing executable *disables* the tests instead of failing them - build it with
+#      `cargo build -p nanite-viewer-rs`. Its CLI mirrors pbrtexture's flag for flag, which is why
+#      `RunRenderTest.cmake` drives it unchanged: only `RENDER_EXE` differs.
+#      Measured against the C++ goldens at 1920x1080: shaded 0.0077 / vis1 0.0221 / vis2 0.0087 /
+#      vis3 0.0055 mean abs diff, ~0.013% bad pixels - far inside imagecompare's defaults, and that
+#      slack is kept on purpose because a different GPU may pick a different LOD set.
+set(NANITE_VIEWER_RS_EXE "${CMAKE_SOURCE_DIR}/rust/target/debug/nanite-viewer-rs.exe"
+    CACHE FILEPATH "nanite-viewer-rs executable (cargo build -p nanite-viewer-rs)")
+set(RUST_VIEWER_COMMON
+    -DRENDER_EXE=${NANITE_VIEWER_RS_EXE}
+    -DCOMPARE_EXE=$<TARGET_FILE:imagecompare>
+    -DMODEL=${RENDER_TEST_MODEL}
+    -DASSETS_DIR=${CMAKE_SOURCE_DIR}/assets
+    -DFRAMES=10)
+
+# 15. The shaded image through the Rust viewer. `--model bunny` resolves to `bunny.gltf` and `Auto`
+#     prefers the sibling `bunny.fcc` baked by the C++ builder, so this exercises the Rust blob
+#     reader, the whole WGSL port (BVH traversal, cull, both rasterizers, the merge, PBR + IBL) and
+#     the Rust `viewAll()` framing against the same golden the C++ viewer is pinned to.
+add_test(NAME render_rust_viewer_bunny
+    COMMAND ${CMAKE_COMMAND} ${RUST_VIEWER_COMMON}
+        -DOUT=${TEST_OUTPUT_DIR}/rust_viewer_bunny.png
+        -DREFERENCE=${RENDER_TEST_GOLDEN}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/RunRenderTest.cmake)
+
+# 16-18. The other visualization modes, pinned to their own goldens exactly like tests 9-11.
+foreach(vis_mode ${VIS_MODES})
+    add_test(NAME render_rust_viewer_vis${vis_mode}
+        COMMAND ${CMAKE_COMMAND} ${RUST_VIEWER_COMMON}
+            -DOUT=${TEST_OUTPUT_DIR}/rust_viewer_vis${vis_mode}.png
+            -DREFERENCE=${CMAKE_CURRENT_SOURCE_DIR}/golden/pbrtexture_${RENDER_TEST_MODEL}_vis${vis_mode}.png
+            -DRENDER_ARGS=--nanite-blob\;--visualize\;${vis_mode}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/RunRenderTest.cmake)
+endforeach()
+
+# 19. Opening the blob *instead of* the mesh: bit identical to test 15, so the `.fcc` alone is enough
+#     for the Rust viewer to draw the model - no glTF and no asset pipeline involved. The same claim
+#     as C++ test 8, and it holds bit-exactly here too because both runs read the same payload.
+add_test(NAME render_rust_viewer_blob_only
+    COMMAND ${CMAKE_COMMAND}
+        -DRENDER_EXE=${NANITE_VIEWER_RS_EXE}
+        -DCOMPARE_EXE=$<TARGET_FILE:imagecompare>
+        -DMODEL=${RENDER_TEST_MODEL}.fcc
+        -DASSETS_DIR=${CMAKE_SOURCE_DIR}/assets
+        -DFRAMES=10
+        -DOUT=${TEST_OUTPUT_DIR}/rust_viewer_blob_only.png
+        -DREFERENCE=${TEST_OUTPUT_DIR}/rust_viewer_bunny.png
+        -DCOMPARE_ARGS=--mean-tol\;0\;--pixel-tol\;0\;--max-bad\;0
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/RunRenderTest.cmake)
+
+# 20. Reloading a blob **twice** in the Rust viewer - the port of the C++ test 13 regression (picking
+#     a `.fcc` a second time in the file dialog used to fault on an uninitialized
+#     `vkglTF::Model::device`). Bit exact against test 19, so a reload that silently drops the scene
+#     or leaves the previous one behind fails too.
+add_test(NAME render_rust_viewer_blob_reload_twice
+    COMMAND ${CMAKE_COMMAND}
+        -DRENDER_EXE=${NANITE_VIEWER_RS_EXE}
+        -DCOMPARE_EXE=$<TARGET_FILE:imagecompare>
+        -DMODEL=${RENDER_TEST_MODEL}.fcc
+        -DASSETS_DIR=${CMAKE_SOURCE_DIR}/assets
+        -DFRAMES=10
+        -DOUT=${TEST_OUTPUT_DIR}/rust_viewer_blob_reload_twice.png
+        -DREFERENCE=${TEST_OUTPUT_DIR}/rust_viewer_blob_only.png
+        -DRENDER_ARGS=--reload\;${CMAKE_SOURCE_DIR}/assets/models/${RENDER_TEST_MODEL}.fcc\;--reloadframe\;5\;--reload2\;${CMAKE_SOURCE_DIR}/assets/models/${RENDER_TEST_MODEL}.fcc\;--reload2frame\;8
+        -DCOMPARE_ARGS=--mean-tol\;0\;--pixel-tol\;0\;--max-bad\;0
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/RunRenderTest.cmake)
+
+# 21. Every dataset, in the Rust viewer. Deliberately *not* image-compared: `nanite_test` crashes the
+#     **C++ builder** (`nanite_bake --rebuild` dies with 0xC0000005 right after "LOD 3 generated", the
+#     same pre-existing small-mesh bug family as teapot/sphere/voyager), so for that model no C++
+#     reference image exists at all - while the Rust builder handles it fine. What is asserted instead
+#     is that each source loads with a non-empty scene and that a frame is written. Under `Auto` that
+#     means the `.fcc` reader for `bunny`/`bunny.fcc`/`bunny_rs.fcc`/`venus`/`nanite_test_plane` (each
+#     has a sibling blob) and in-process `nanite-bake-rs` for `dragon` and `nanite_test`, which have
+#     no `.fcc` - that is the point of those two entries.
+add_test(NAME render_rust_viewer_datasets
+    COMMAND ${CMAKE_COMMAND}
+        -DVIEWER_RS_EXE=${NANITE_VIEWER_RS_EXE}
+        -DASSETS_DIR=${CMAKE_SOURCE_DIR}/assets
+        -DOUT_DIR=${TEST_OUTPUT_DIR}
+        -DMODELS=${RENDER_TEST_MODEL}\;${RENDER_TEST_MODEL}.fcc\;${RENDER_TEST_MODEL}_rs.fcc\;venus\;dragon\;nanite_test\;nanite_test_plane
+        -DFRAMES=10
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/RunRustViewerSmokeTest.cmake)
+
+foreach(rust_test render_rust_viewer_bunny render_rust_viewer_vis1 render_rust_viewer_vis2
+                  render_rust_viewer_vis3 render_rust_viewer_blob_only
+                  render_rust_viewer_blob_reload_twice render_rust_viewer_datasets)
+    set_tests_properties(${rust_test} PROPERTIES
+        FIXTURES_REQUIRED nanite_cache TIMEOUT 1200 RUN_SERIAL TRUE)
+endforeach()
+if(NOT EXISTS "${NANITE_VIEWER_RS_EXE}")
+    set_tests_properties(render_rust_viewer_bunny render_rust_viewer_vis1 render_rust_viewer_vis2
+        render_rust_viewer_vis3 render_rust_viewer_blob_only render_rust_viewer_blob_reload_twice
+        render_rust_viewer_datasets PROPERTIES DISABLED TRUE)
+endif()
+
 # Self-test of the comparison tool: an image compares equal to itself and the tool reports missing files.
 add_test(NAME imagecompare_selftest
     COMMAND imagecompare ${RENDER_TEST_GOLDEN} ${RENDER_TEST_GOLDEN} --mean-tol 0 --max-bad 0)

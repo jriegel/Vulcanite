@@ -13,11 +13,7 @@
 //! The C++ builder stays in place; this binary is the first stage of the Rust port and is checked
 //! against the C++ one by rendering both blobs in the same viewer.
 
-mod bvh;
-mod cluster;
-mod emit;
-mod gltf_load;
-mod mesh;
+use nanite_bake_rs::bake;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -397,52 +393,19 @@ fn bake(path: &Path, args: &Args) -> Result<()> {
 	);
 	bar.enable_steady_tick(std::time::Duration::from_millis(120));
 
-	bar.set_message(format!("loading {}", path.display()));
+	bar.set_message(format!("baking {}", path.display()));
 	let started = std::time::Instant::now();
-	// The glTF is loaded through the same flag set the C++ builder uses: vertices pre-transformed
-	// by the node matrix, Y flipped, vertex colours pre-multiplied. Baking with a different set
-	// yields a mirrored mesh that still passes every hash check.
-	let loaded = gltf_load::load_first_mesh(path)
-		.with_context(|| format!("loading {}", path.display()))?;
-	tracing::info!(
-		"loaded node {:?}: {} vertices, {} indices",
-		loaded.node_name,
-		loaded.vertices.len(),
-		loaded.indices.len()
-	);
-	// Parity note: `NaniteMesh::modelMatrix` is stored the same way and is equally never read by
-	// the bake - `loadvkglTFModel` already applied it to every vertex (`PreTransformVertices`), so
-	// applying it again would scale the model twice.
-	tracing::debug!(
-		"node matrix of {:?} is informational only (vertices are pre-transformed): {:?}",
-		loaded.node_name, loaded.node_matrix
-	);
-
-	bar.set_message("building clusters");
-	let mut lod = mesh::LodMesh::new(gltf_load::to_triangle_mesh(&loaded));
-	cluster::build_clusters(&mut lod);
-	cluster::build_cluster_groups(&mut lod);
-	if let Err(problem) = cluster::check_partition(&lod) {
-		anyhow::bail!("partition invalid: {problem}");
-	}
-	tracing::info!(
-		"{} triangles -> {} clusters in {} groups",
-		lod.mesh.face_count(),
-		lod.clusters.len(),
-		lod.cluster_groups.len()
-	);
-
-	bar.set_message("building BVH");
-	bvh::build_bvh(&mut lod);
-	tracing::info!("BVH: {} nodes", lod.bvh.as_ref().unwrap().nodes.len());
+	// The whole pipeline lives in `bake::bake_asset` so the viewer builds the same `Asset`
+	// in-process. `bake_asset` also runs `check_asset` unless asked not to.
+	let (asset, report) = bake::bake_asset(
+		path,
+		bake::BakeOptions {
+			skip_check: args.no_check,
+		},
+	)
+		.with_context(|| format!("baking {}", path.display()))?;
 
 	bar.set_message("writing blob");
-	let asset = emit::build_asset(&loaded, &lod, path);
-	if !args.no_check {
-		if let Err(problem) = emit::check_asset(&asset) {
-			anyhow::bail!("blob would not load: {problem}");
-		}
-	}
 	// `sourceHash` over the *source mesh* file, the same bytes the C++ builder hashes. A missing
 	// file hashes to 0, which tells `read()` to skip the strict check - deliberate, so a shipped
 	// blob whose mesh is gone still loads.
@@ -450,12 +413,13 @@ fn bake(path: &Path, args: &Args) -> Result<()> {
 	nanite_blob::write(&out, &asset, source_hash).with_context(|| format!("writing {}", out.display()))?;
 
 	bar.finish_and_clear();
-	let lod0 = lod.clusters.len();
 	println!(
-		"{}: {} triangles -> {lod0} clusters, {} BVH nodes -> {} ({} bytes, {:.1} s)",
+		"{}: {} triangles -> {} clusters in {} groups, {} BVH nodes -> {} ({} bytes, {:.1} s)",
 		path.display(),
-		lod.mesh.face_count(),
-		lod.bvh.as_ref().unwrap().nodes.len() + 1,
+		report.triangles,
+		report.clusters,
+		report.cluster_groups,
+		report.bvh_nodes,
 		out.display(),
 		out.metadata().map(|m| m.len()).unwrap_or(0),
 		started.elapsed().as_secs_f64()

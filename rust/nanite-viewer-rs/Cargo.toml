@@ -1,0 +1,40 @@
+[package]
+name = "nanite-viewer-rs"
+description = "wgpu/egui/WGSL port of the pbrtexture nanite viewer: renders .fcc blobs or glTF through the Rust asset pipeline."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytemuck.workspace = true
+clap.workspace = true
+glam.workspace = true
+nanite-blob.workspace = true
+nanite-bake-rs.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Viewer stack. egui-wgpu 0.36.2 pins wgpu 30 / winit 0.30.13, so those three are locked
+# together. eframe is deliberately NOT used: it chooses the adapter itself, and this machine
+# has an Intel iGPU plus a MirrorOp virtual adapter next to the NVIDIA RTX 3500 Ada, so the
+# adapter has to be picked explicitly - a nanite viewer on the iGPU is useless.
+winit = "0.30.13"
+raw-window-handle = "0.6"
+egui = "0.36.2"
+egui-winit = "0.36.2"
+egui-wgpu = "0.36.2"
+wgpu = "30.0.1"
+pollster = "0.4.0"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+# The *native* open dialog, matching base/FileDialog.cpp (which uses GetOpenFileNameW). rfd 0.17
+# picks its Windows Common Item Dialog backend on Windows (src/backend.rs + build.rs), so this is
+# the real shell dialog, not a widget.
+rfd = "0.17"
+
+# The library holds everything testable (CLI parsing, camera, framing, scene assembly); the binary
+# is only the winit event loop.
+[[bin]]
+name = "nanite-viewer-rs"
+path = "src/main.rs"

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "nanite-blob",
     "nanite-bake-rs",
+    "nanite-viewer-rs",
 ]
 
 [workspace.package]
@@ -14,6 +15,7 @@ repository = "https://github.com/jriegel/Vulcanite"
 
 [workspace.dependencies]
 nanite-blob = { path = "nanite-blob" }
+nanite-bake-rs = { path = "nanite-bake-rs" }
 anyhow = "1"
 bytemuck = { version = "1", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
