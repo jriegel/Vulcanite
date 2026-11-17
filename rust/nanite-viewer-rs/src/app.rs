@@ -37,7 +37,7 @@ use glam::{Mat4, Vec3};
 use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
@@ -52,6 +52,28 @@ use crate::scene::Scene;
 const ROTATION_SPEED: f32 = 0.25;
 /// `handleMouseMove()`: the hard-coded `0.005f` for the right and middle mouse buttons.
 const TRANSLATE_SPEED: f32 = 0.005;
+/// Mouse-wheel dolly, in world units **per wheel notch**.
+///
+/// `base/vulkanexamplebase.cpp:1450-1454` is the reference:
+///
+/// ```cpp
+/// case WM_MOUSEWHEEL:
+///     short wheelDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+///     camera.translate(glm::vec3(0.0f, 0.0f, (float)wheelDelta * 0.005f));
+///     viewUpdated = true;
+/// ```
+///
+/// One notch is `WHEEL_DELTA == 120`, so a notch dollies `120 * 0.005 == 0.6` world units. winit
+/// already does that normalisation for us — `winit-0.30.13/src/platform_impl/windows/event_loop.rs`
+/// (`WM_MOUSEWHEEL`) computes `((wParam >> 16) as i16) as f32 / WHEEL_DELTA` and reports it as
+/// `MouseScrollDelta::LineDelta(0.0, value)`, i.e. **+1.0 per notch scrolled towards the user**.
+/// So this constant is the C++ `120 * 0.005`, applied to winit's already-normalised notch count.
+const WHEEL_DOLLY_PER_NOTCH: f32 = 0.6;
+/// Touch/precision-gesture deltas arrive as `MouseScrollDelta::PixelDelta` instead of notches
+/// (`winit`'s Win32 backend only emits that for pointer-based scrolling). Dividing by this keeps a
+/// deliberate gesture roughly the size of one notch; the C++ example has no touch handling at all,
+/// so the exact value is a feel choice rather than a ported constant.
+const WHEEL_PIXELS_PER_NOTCH: f32 = 100.0;
 /// `vulkanexamplebase.h:161-162`.
 const DEFAULT_WIDTH: u32 = 1920;
 const DEFAULT_HEIGHT: u32 = 1080;
@@ -222,7 +244,10 @@ fn print_usage() {
          --capture <file.png>  capture frames to a PNG\n\
          --captureframes <N>   number of frames to capture (default 10)\n\
          --width <N> / --height <N>\n\
-         --log <level>         off|error|warn|info|debug|trace"
+         --log <level>         off|error|warn|info|debug|trace\n\
+         \n\
+         navigation: WASD walk, V view all, O open model, Esc quit\n\
+         mouse drag: left rotate, right dolly, middle pan; mouse wheel dollies along the view axis"
     );
 }
 
@@ -284,6 +309,10 @@ pub struct App {
     lod_level: i32,
     model: Option<LoadedModel>,
     scene: Option<Scene>,
+    /// The loaded scene's bounding sphere, cached so the far clipping plane can be re-derived from
+    /// the eye position on every frame without re-walking the cluster AABBs. See
+    /// [`load::update_far_plane`].
+    scene_bounds: Option<load::SceneBounds>,
 
     frames_rendered: u64,
     frame_counter: u32,
@@ -337,6 +366,7 @@ impl App {
             lod_level: 0,
             model: None,
             scene: None,
+            scene_bounds: None,
             frames_rendered: 0,
             frame_counter: 0,
             last_fps: 0.0,
@@ -561,6 +591,9 @@ impl App {
             .ok_or_else(|| anyhow::anyhow!("the renderer is not ready"))?;
         renderer.load_scene(&scene)?;
         info!("[scene] {label}: {summary}");
+        // Computed before `scene` moves into `self`: the bounding sphere is cached so the far
+        // clipping plane can be re-derived from the eye on every frame.
+        self.scene_bounds = load::SceneBounds::from_scene(&scene);
         self.model = Some(loaded);
         self.scene = Some(scene);
 
@@ -624,6 +657,13 @@ impl App {
             }
         }
         self.handle_pending_command_line_reload();
+
+        // The far clipping plane follows the scene instead of staying where `viewAll()` put it, so
+        // walking or wheel-dolly-ing out of the model cannot push it behind the far plane. Runs
+        // *before* `draw` and after every input handler, so it sees this frame's eye; at a pose the
+        // camera has not moved from, it is a no-op (`far == camera.far`) and the projection is not
+        // rebuilt at all — which is why the `--capture` goldens stay bit-identical.
+        self.update_far_plane();
 
         // The capture is a one-shot: `capture.pending` is set for exactly one frame and cleared
         // inside `submitFrame` (`vulkanexamplebase.cpp:783-790`), and the example exits right
@@ -1052,6 +1092,21 @@ impl App {
 
     // ---------------------------------------------------------------- camera
 
+    /// Keep the far plane wrapped around [`load::SceneBounds`] for the current eye. Logged once per
+    /// change at `debug`, because a plane that moves is the thing to look for when geometry
+    /// disappears.
+    fn update_far_plane(&mut self) {
+        let Some(bounds) = self.scene_bounds else {
+            return;
+        };
+        let (width, height) = self.render_size();
+        let before = self.camera.far;
+        let far = load::update_far_plane(&bounds, &mut self.camera, width, height);
+        if far != before {
+            tracing::debug!("[far plane] {before:.3} -> {far:.3} (eye {:?})", self.camera.cam_pos());
+        }
+    }
+
     fn run_view_all(&mut self) {
         let (width, height) = self.render_size();
         let Some(scene) = self.scene.as_ref() else {
@@ -1097,6 +1152,27 @@ impl App {
                 .translate(Vec3::new(-dx * TRANSLATE_SPEED, -dy * TRANSLATE_SPEED, 0.0));
             self.view_updated = true;
         }
+    }
+
+    /// The mouse-wheel handler: the port of `WM_MOUSEWHEEL` (`base/vulkanexamplebase.cpp:1450-1454`),
+    /// which dollies with `camera.translate(vec3(0, 0, wheelDelta * 0.005f))` and then sets
+    /// `viewUpdated = true`.
+    ///
+    /// Same *magnitude* as C++ (0.6 world units per notch) and the same sign — scrolling towards the
+    /// user dollies the eye in — but along the **view axis** rather than world Z: the C++
+    /// `Camera::translate` is a raw `position += delta`, so its wheel only moves forward for the
+    /// default pose. See [`Camera::dolly`]. egui gets first refusal, because the overlay's sliders
+    /// are dragged with the wheel too.
+    fn mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        if self.egui_ctx.egui_wants_pointer_input() {
+            return;
+        }
+        let z = wheel_dolly_z(delta);
+        if z == 0.0 {
+            return;
+        }
+        self.camera.dolly(z);
+        self.view_updated = true;
     }
 
     /// `handlePendingModelDialog()` (`pbrtexture.cpp:4326`): the same filters, the same title,
@@ -1177,6 +1253,7 @@ impl ApplicationHandler for App {
                     self.mouse_pos = None;
                 }
             }
+            WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
             WindowEvent::CursorMoved { position, .. } => self.mouse_moved(position.x, position.y),
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
@@ -1220,6 +1297,22 @@ pub fn run(args: Args) -> Result<()> {
         .run_app(&mut app)
         .map_err(|e| anyhow::anyhow!("the event loop stopped: {e}"))?;
     Ok(())
+}
+
+/// How far one wheel event dollies the camera, in world units along the view axis. Positive means
+/// forward, i.e. scrolled towards the user.
+///
+/// `MouseScrollDelta::LineDelta(x, y)` is winit's *notch* count: the Win32 backend derives it in
+/// `platform_impl/windows/event_loop.rs` from `WM_MOUSEWHEEL` as
+/// `((wParam >> 16) as i16) as f32 / WHEEL_DELTA`, so a notch towards the user is `+1.0` and the
+/// horizontal axis is only ever non-zero for `WM_MOUSEHWHEEL`. Dolly uses the vertical axis only —
+/// horizontal wheel is not part of the C++ navigation model.
+fn wheel_dolly_z(delta: MouseScrollDelta) -> f32 {
+    let notches = match delta {
+        MouseScrollDelta::LineDelta(_, y) => y,
+        MouseScrollDelta::PixelDelta(p) => (p.y / f64::from(WHEEL_PIXELS_PER_NOTCH)) as f32,
+    };
+    notches * WHEEL_DOLLY_PER_NOTCH
 }
 
 /// The blob extension, re-exported so `main.rs` can describe `--model bunny.fcc`.
@@ -1365,6 +1458,30 @@ mod tests {
         assert_eq!(App::source_mode(SourceMode::Auto), load::SourceMode::Auto);
         assert_eq!(App::source_mode(SourceMode::Require), load::SourceMode::Require);
         assert_eq!(App::source_mode(SourceMode::Rebuild), load::SourceMode::Rebuild);
+    }
+
+    #[test]
+    fn one_wheel_notch_dollies_the_cpp_amount() {
+        // `WM_MOUSEWHEEL` is `wheelDelta * 0.005f` with `wheelDelta == 120` per notch, i.e. 0.6.
+        // winit already normalises to notches (`LineDelta`), so one notch in must be 0.6 out.
+        assert!((wheel_dolly_z(MouseScrollDelta::LineDelta(0.0, 1.0)) - 0.6).abs() < 1e-6);
+        assert!((wheel_dolly_z(MouseScrollDelta::LineDelta(0.0, -1.0)) + 0.6).abs() < 1e-6);
+        // High-resolution wheels report fractional notches; they scale linearly.
+        assert!((wheel_dolly_z(MouseScrollDelta::LineDelta(0.0, 0.1)) - 0.06).abs() < 1e-6);
+        // Horizontal wheel is not part of the navigation model.
+        assert_eq!(wheel_dolly_z(MouseScrollDelta::LineDelta(3.0, 0.0)), 0.0);
+        assert_eq!(wheel_dolly_z(MouseScrollDelta::PixelDelta(Default::default())), 0.0);
+    }
+
+    #[test]
+    fn pixel_dolly_is_scaled_to_notches() {
+        // `PixelDelta` is physical pixels of content movement, positive = content moves down, which
+        // is the same direction as a notch towards the user. `WHEEL_PIXELS_PER_NOTCH` keeps a
+        // deliberate gesture roughly notch-sized.
+        let d = MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition { x: 0.0, y: 100.0 });
+        assert!((wheel_dolly_z(d) - 0.6).abs() < 1e-6);
+        let d = MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition { x: 0.0, y: -50.0 });
+        assert!((wheel_dolly_z(d) + 0.3).abs() < 1e-6);
     }
 
     #[test]

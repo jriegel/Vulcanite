@@ -12,6 +12,8 @@
 #   BLOB_RS        the blob the Rust tool writes - deliberately *not* `<model>.fcc`, which is the
 #                  C++ builder's output and the reference of tests 3/8/13. Overwriting it would make
 #                  the C++ tests compare against the Rust blob.
+#   COMPARE_ARGS        tolerances for comparison 1 (optional, empty = imagecompare's defaults)
+#   LOD0_COMPARE_ARGS   tolerances for comparison 2 (optional, empty = imagecompare's defaults)
 #
 # Two comparisons, because the Rust builder produces a *single* LOD (no OpenMesh decimation, no METIS
 # collapse order to reproduce), so it always draws LOD 0 at full detail while the C++ blob draws a
@@ -21,6 +23,20 @@
 #   2. `--threshold 0` on both blobs, which pins the C++ blob to LOD 0 as well, so the two are
 #      drawing the same triangles. That is the comparison which would catch a wrong cluster, a wrong
 #      index range or a wrong AABB, instead of only "roughly the same silhouette".
+#
+# Why this test needs its *own* tolerances: the C++ viewer's render of a single-LOD blob is not
+# run-to-run reproducible. `bunny_rs.fcc` has one LOD, so the occlusion cull has to reject clusters
+# itself, and it does so against a HiZ pyramid the example leaves uninitialised - so the set of
+# clusters it rejects moves between processes. Measured over 10 captures of `bunny_rs.fcc`, every
+# single one hashed differently, and `--raster-stats` confirms it: frame 9 emitted 287074 / 287073 /
+# 284992 / 287073 / 287073 triangles across five runs. `--visualize 2` (a hash of the visibility
+# buffer id, which reads no depth) is 10/10 distinct too, so the winning triangle *ids* move, not
+# just the reconstructed depth. The same probe on `bunny.fcc` is 10/10 identical (52729 triangles in
+# every frame of every run), because there LOD selection - not occlusion - decides what is drawn.
+# Consequence for comparison 1: the bad-pixel fraction against the golden wobbles over
+# 1.30%..2.64% (mean abs diff 0.71..1.21), which *straddles* imagecompare's default `--max-bad 0.02`.
+# That is the whole flake: ~1 in 10 runs lands above it. The tolerances below are therefore set above
+# the measured worst case rather than at it.
 
 foreach(var RENDER_EXE COMPARE_EXE BAKE_RS_EXE ASSETS_DIR MODEL OUT REFERENCE)
     if(NOT DEFINED ${var})
@@ -32,6 +48,12 @@ if(NOT DEFINED FRAMES)
 endif()
 if(NOT DEFINED BLOB_RS)
     set(BLOB_RS "${ASSETS_DIR}/models/${MODEL}_rs.fcc")
+endif()
+if(NOT DEFINED COMPARE_ARGS)
+    set(COMPARE_ARGS "")
+endif()
+if(NOT DEFINED LOD0_COMPARE_ARGS)
+    set(LOD0_COMPARE_ARGS "")
 endif()
 
 get_filename_component(OUT_DIR "${OUT}" DIRECTORY)
@@ -81,7 +103,7 @@ if("$ENV{VULCANITE_UPDATE_GOLDEN}" STREQUAL "1")
     set(update_args --update)
 endif()
 execute_process(
-    COMMAND "${COMPARE_EXE}" "${OUT}" "${REFERENCE}" --diff "${OUT}.diff.png" ${update_args}
+    COMMAND "${COMPARE_EXE}" "${OUT}" "${REFERENCE}" --diff "${OUT}.diff.png" ${COMPARE_ARGS} ${update_args}
     RESULT_VARIABLE compare_result)
 if(NOT compare_result EQUAL 0)
     message(FATAL_ERROR "Rust blob render differs from ${REFERENCE} (result: ${compare_result}), see ${OUT} and ${OUT}.diff.png")
@@ -113,7 +135,7 @@ foreach(image "${cpp_lod0}" "${rs_lod0}")
 endforeach()
 
 execute_process(
-    COMMAND "${COMPARE_EXE}" "${rs_lod0}" "${cpp_lod0}" --diff "${OUT}.lod0.diff.png"
+    COMMAND "${COMPARE_EXE}" "${rs_lod0}" "${cpp_lod0}" --diff "${OUT}.lod0.diff.png" ${LOD0_COMPARE_ARGS}
     RESULT_VARIABLE lod_compare_result)
 if(NOT lod_compare_result EQUAL 0)
     message(FATAL_ERROR "Rust LOD-0 render differs from the C++ LOD-0 render (result: ${lod_compare_result}), see ${rs_lod0}, ${cpp_lod0} and ${OUT}.lod0.diff.png")

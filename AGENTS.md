@@ -87,7 +87,9 @@ reuses them. Tests 15–21 drive the **Rust** viewer — see *Rust viewer*.
   no `COMPARE_ARGS` at all, so they run with those. Those tolerances are slack, not needed: since
   the camera stopped moving (see *Camera and "View all"*), every bunny capture measured on this
   machine is **bit-identical** to its golden (`mean abs diff 0.0000`, 0% bad pixels) — fresh,
-  cached, blob, reload, baked-by-tool and blob-only alike. The tolerances stay because a different
+  cached, blob, reload, baked-by-tool and blob-only alike. That reproducibility is a property of the
+  **multi-LOD** `bunny.fcc` render; a single-LOD blob render is not reproducible at all (see the
+  `RunRustBlobTest` bullet). The tolerances stay because a different
   GPU may still pick a slightly different LOD set; do not tighten them to "prove" anything.
   Only tests 3, 4, 5 and 13 demand bit equality, and each of them compares against an *earlier
   capture*, not the golden image.
@@ -127,11 +129,26 @@ reuses them. Tests 15–21 drive the **Rust** viewer — see *Rust viewer*.
   replace the C++ builder's output that tests 3/8/13 compare against. Two comparisons, because the
   Rust builder emits **one LOD** (no OpenMesh decimation, no METIS collapse order to reproduce) and
   therefore always draws LOD 0 at full detail while the C++ blob draws a mix of levels:
-  1. default render vs the golden image at imagecompare's defaults — measured `0.93` mean abs diff /
-     `1.91%` bad, i.e. inside the tolerance but nowhere near bit-exact, and that is expected.
+  1. default render vs the golden image — measured mean abs diff `0.71`–`1.21` and `1.30`–`2.64%` bad
+     pixels *across repeated runs of the same blob*, i.e. nowhere near bit-exact and expected.
   2. `--threshold 0` on **both** blobs, which pins the C++ blob to LOD 0 too, so both draw the same
-     triangles — measured `0.26` / `0.52%` bad. This is the comparison that catches a wrong cluster,
-     a wrong index range or a wrong AABB instead of only "roughly the same silhouette".
+     triangles — measured `0.25`–`0.58` mean / `0.50`–`1.27%` bad. This is the comparison that catches
+     a wrong cluster, a wrong index range or a wrong AABB instead of only "roughly the same silhouette".
+  **Both comparisons run with explicit tolerances** (`-DCOMPARE_ARGS=--mean-tol 2 --pixel-tol 24
+  --max-bad 0.05`, `-DLOD0_COMPARE_ARGS=… --max-bad 0.03`), *not* imagecompare's defaults, and the
+  reason is a real property of the renderer rather than a flake to be tolerated: **the C++ viewer's
+  render of a single-LOD blob is not run-to-run reproducible.** With one LOD there is nothing for LOD
+  selection to discard, so what survives is decided by the occlusion cull — and that cull reads a HiZ
+  pyramid the example never initialises (`createHiZBuffer` has no clear). Measured over 10 captures of
+  `bunny_rs.fcc`: 10/10 distinct hashes, and `--visualize 2` (a hash of the visibility-buffer id, which
+  reads no depth) is 10/10 distinct too, so the winning triangle *ids* move, not merely the
+  reconstructed depth. `--raster-stats` agrees: frame 9 emitted `287074 / 287073 / 284992 / 287073 /
+  287073` triangles in five consecutive runs. The identical probe on `bunny.fcc` is 10/10 identical
+  (`52729` triangles in every frame of every run) — that is why tests 1–13 stay bit-exact and this one
+  cannot. The old default `--max-bad 0.02` sat *inside* that spread, so roughly one run in ten failed
+  (measured 1/10 before, 0/10 after). `0.05` is ~2× the measured worst case and still catches every
+  failure mode the test exists for: the raster-buffer overflow rendered as scraps and a mirrored bake
+  both land at 63% bad.
   `NANITE_BAKE_RS_EXE` is a cache variable pointing at the cargo output; the test is marked `DISABLED`
   when the file does not exist, so a C++-only checkout still passes 15/15.
 - Re-baseline the golden image with `$env:VULCANITE_UPDATE_GOLDEN = "1"` before ctest. That env var
@@ -148,7 +165,14 @@ Gotchas that cost real debugging time:
 - `add_test` arguments containing `;` must be escaped as `\;`, otherwise CMake splits them
   into separate argv entries (`-DCOMPARE_ARGS=--mean-tol\;0\;--pixel-tol\;0`).
 - Editing `tests/CMakeLists.txt` does nothing until a rebuild regenerates
-  `CTestTestfile.cmake`.
+  `CTestTestfile.cmake`. And that rebuild can fail *silently for your purposes*: if
+  `build/CMakeCache.txt` pins `CMAKE_ROOT:INTERNAL=C:/Tools/CMake/share/cmake-4.1` while the installed
+  CMake is newer (`C:\Tools\CMake\share` only has `cmake-4.5`), `cmake --build build --config Release`
+  dies with "File …/cmake-4.1/Modules/CMakeSystem.cmake.in does not exist" plus a cascade of
+  `CMakeDetermineCCompiler` errors and "Configuring incomplete". `ctest -N` still lists all tests off
+  the *stale* `CTestTestfile.cmake`, so everything looks fine while your edited tolerances are never
+  used. Fix: rewrite that one cache line to the installed module dir (a backup was kept at
+  `build/CMakeCache.txt.bak`), or re-run `Setup.bat`.
 - When running an exe by hand, always pass **absolute** `--capture` paths; relative paths
   resolve against the current shell directory, not `build/bin/Release`.
 - Do not pipe an interactive exe through `Select-Object -First N` — it truncates and hides
@@ -329,10 +353,11 @@ gltf 1.4 with `extras`, indicatif, thiserror 2, tracing, tracing-subscriber).
   which is the reference image for tests 3/8/13. The test suite uses `bunny_rs.fcc`.
 - Measured on `bunny`: Rust bake **0.1 s** / 10,119,216 B (1 LOD, 2575 clusters, 260 BVH nodes);
   C++ bake ~8 s / 20,068,144 B (6 LODs, 15450 clusters). Rendered through the C++ viewer at the
-  default threshold: mean abs diff `0.71`–`0.93`, `1.3–1.9%` bad pixels against the golden. Pinning
-  both blobs to LOD 0 (`--threshold 0`) narrows that to `0.26` / `0.52%`, which is the residual from
-  the different cluster partition — bit equality would require porting OpenMesh's decimation order
-  and METIS, and is not the goal.
+  default threshold: mean abs diff `0.71`–`1.21`, `1.3`–`2.64%` bad pixels against the golden — that
+  range is *run to run of the same blob*, not across blobs (see the `RunRustBlobTest` bullet: a
+  single-LOD render is not reproducible). Pinning both blobs to LOD 0 (`--threshold 0`) narrows that
+  to `0.25`–`0.58` / `0.50`–`1.27%`, which is the residual from the different cluster partition — bit
+  equality would require porting OpenMesh's decimation order and METIS, and is not the goal.
 
 ## Rust viewer
 
@@ -340,12 +365,14 @@ gltf 1.4 with `extras`, indicatif, thiserror 2, tracing, tracing-subscriber).
 re-done on **wgpu 30** + **WGSL** + **egui 0.36** (winit 0.30, egui-winit/egui-wgpu 0.36.2,
 rfd 0.17 for the open dialog). It shares no renderer code with the C++ example — only the `.fcc`
 format, the GPU struct ABI and the WGSL ports of the GLSL shaders. It renders the same images:
-measured against the four C++ goldens at 1920×1080, mean abs diff `0.0077` (shaded) / `0.0221`
-(vis1) / `0.0087` (vis2) / `0.0055` (vis3), ~0.013 % bad pixels.
+measured against the four C++ goldens at 1920×1080, mean abs diff `0.0316` (shaded) / `0.0224`
+(vis1) / `0.0093` (vis2) / `0.0058` (vis3), ~0.014 % bad pixels. The shaded number is larger than it
+used to be (`0.0077`) because the Rust viewer has **no front clipping plane** — see the
+`NEAR_CLIP_DISABLED` bullet below.
 
 ```
 cargo build -p nanite-viewer-rs                              # from rust/  -> debug exe
-cargo test  --manifest-path rust/Cargo.toml -p nanite-viewer-rs --lib   # 73 tests
+cargo test  --manifest-path rust/Cargo.toml -p nanite-viewer-rs --lib   # 77 tests
 rust\target\debug\nanite-viewer-rs.exe --model bunny --capture out.png --captureframes 10
 ```
 
@@ -355,7 +382,15 @@ Flags mirror `pbrtexture` one for one (`--model`, `--nanite-blob`/`--nanite-json
 `Args::parse` is **hand-written, not clap** — deliberately, because the C++ parser is
 positional-tolerant and clap would reject argument orders the tests already use. Keys: `WASD`,
 `V` = view all, `O` = open dialog, `Esc` = quit; mouse drag matches
-`vulkanexamplebase.cpp` (`dx = previous_x - current_x`, left = rotate, right = dolly, middle = pan).
+`vulkanexamplebase.cpp` (`dx = previous_x - current_x`, left = rotate, right = dolly, middle = pan),
+and the **mouse wheel dollies along the view axis** (`App::mouse_wheel` → `Camera::dolly`,
+`WHEEL_DOLLY_PER_NOTCH = 0.6` — the same `120 * 0.005f` magnitude the C++ wheel handler uses, but
+following the camera instead of `base/camera.hpp::translate`'s **world Z**). winit delivers a notch
+as `MouseScrollDelta::LineDelta(0.0, +1.0)` towards the user
+(`winit-0.30.13/src/platform_impl/windows/event_loop.rs`, `wparam >> 16 / WHEEL_DELTA`); touchpads
+send `PixelDelta`, which `wheel_dolly_z` divides by `WHEEL_PIXELS_PER_NOTCH = 100` to get the same
+feel. The handler bails when `egui_ctx.egui_wants_pointer_input()`, so scrolling the overlay never
+moves the camera.
 
 Layout (`src/`): `main.rs` (CLI + tracing), `app.rs` (winit `ApplicationHandler`, surface, overlay,
 input, reload queue), `renderer.rs` (pipelines, bind groups, the whole frame graph), `scene.rs`
@@ -426,13 +461,77 @@ input, reload queue), `renderer.rs` (pipelines, bind groups, the whole frame gra
   counters instead of pixels for it. Under `Auto` the Rust viewer prefers a sibling `.fcc`, so
   `dragon` and `nanite_test` are the two datasets that go through the **in-process** Rust baker.
 - Measured Rust scene counters / framing (`[view all] …`): `bunny.fcc` 283110 tris / 5212 clusters,
-  center (−0.149, −0.831, 1.557) r 2.392 d 5.501 near 2.870 far 16 — identical to C++;
+  center (−0.149, −0.831, 1.557) r 2.392 d 5.501 far 16 — at the *framing* pose identical to C++
+  except for `near`, which the Rust viewer does **not** derive from the framing (see the next two
+  bullets); `far` additionally follows the eye once the camera moves, which C++'s never does;
   `venus` 117242 / 2160, r 2.192 d 5.043; `dragon` (baked) 871414 / 15703, r 3.138 d 7.218;
   `nanite_test` (baked) 4232 / 76; `nanite_test_plane` 4232 / 2116; `bunny_rs.fcc` 144046 / 2575.
   Dataset diffs vs the C++ viewer at 640×512: `bunny.fcc` 0.1028, `bunny_rs.fcc` 0.4639,
   `venus` 0.0999, `dragon` 1.1087, `nanite_test_plane` 0.4397 — all inside imagecompare's defaults.
-  `--model bunny.fcc` vs `--model bunny` in the Rust viewer is **bit-identical** (0.0000 / 0 % bad),
-  which is what tests 19–20 pin.
+  `--model bunny.fcc` vs `--model bunny` in the Rust viewer is the **same image** (tests 19–20), but
+  not byte-identical run to run any more — see the *no front clipping plane* bullet below.
+- **The Rust viewer has no front clipping plane.** `camera::NEAR_CLIP_DISABLED = 1e-2` is what
+  `DEFAULT_NEAR`, `reset_camera` and `view_all` all use, and `Camera::set_perspective` clamps any
+  `near <= 0` up to it. A literal `0.0` is not implementable: `Mat4::perspective_rh` builds its z row
+  from `far / (near - far)` and `near * far / (near - far)`, so every window depth collapses to 1.0 and
+  the depth test, the HiZ pyramid and the 32-bit depth field of the packed visibility buffer all break.
+  The C++ `viewAll()` instead derives `near = max(0.01, d - 1.1r)` (2.87 for `bunny`) and therefore
+  *does* clip. The chosen value is a **depth-precision budget, not a clipping distance**: with
+  `far / near = R`, a point at view depth `z` lands at window depth `1 - near/z`, so the whole scene is
+  squeezed into the last `near·far/(far - near)` of `[0, 1]`; `shading.wgsl:112` then rebuilds the
+  world position from that depth (`invView * invProj * vec4(uv*2-1, depth, 1)`), and one quantum of
+  depth becomes `~far·1e-7` of world position — enough to perturb the normal and hence the specular.
+  Measured vs the C++ goldens (mean abs diff): shaded `0.0077` at near 2.870 → `0.0316` at 1e-2 →
+  `0.2051` at 1e-3 → `0.8654` at 1e-4, i.e. **linear in 1/near**, while the flat-colour vis modes
+  barely move (vis1 0.0221 → 0.0224, vis3 0.0055 → 0.0058) — proof that the cluster/LOD set and the
+  visibility-buffer ids never change, only the reconstructed position. `1e-2` is the largest value that
+  still clips nothing on any dataset while keeping the shaded golden diff small; `1e-3` already costs
+  0.21 mean abs diff. `1e-2` still sits ~2.6 world units behind the nearest geometry of every dataset,
+  so it clips nothing.
+- **Consequence: the Rust *shaded* capture is no longer bit-deterministic, and tests 19/20 allow for it.**
+  Measured over 20 runs of `--model bunny` at 1920×1080: 18/20 identical, 2/20 differing by exactly
+  **one pixel** with a ±1 LSB channel change (e.g. pixel (467,1051): R 57→58, G 77→76). Rate ≈ 1 in 10
+  captures, i.e. roughly one failing comparison in a 22-test run. Ruled out and confirmed:
+  - **not** the cluster/LOD set or the visibility-buffer ids: `--visualize 2` (a hash of the id, reads
+    no depth) is **20/20 identical** at `1e-2`; `--visualize 0` is 18/20.
+  - **not** hash-order nondeterminism — no `HashMap`/`HashSet`/`RandomState` anywhere in the crate.
+  - **not** the Rust port in general: at `near = 2.870` (what C++ derives) the Rust viewer is **20/20
+    identical**, and the C++ viewer is **10/10** identical. A near sweep at `1e-1`, `1.0` and `2.87` is
+    10/10 each; `1e-2` and `3e-2` are 9/10.
+  So the trigger is depth quantisation: with `near = 1e-2` the scene occupies only
+  `near·far/(far-near) ≈ 0.010` of `[0,1]`, so exact/near depth ties between triangles become common,
+  and the hardware rasterizer's `LessEqual` depth compare (`renderer.rs`, same compare op as C++'s
+  `VK_COMPARE_OP_LESS_OR_EQUAL`) resolves a tie by primitive order, which Vulkan/wgpu do not define.
+  A different winning triangle ⇒ a different reconstructed position ⇒ one LSB of tonemapped colour.
+  `--visualize 2` stays stable because the *visibility* side is a deterministic 64-bit `atomicMax`.
+  Tests 19/20 therefore run `--mean-tol 0.0001 --pixel-tol 0 --max-bad 0.00002`: every differing pixel
+  still counts, and 41 of 2 073 600 pixels are allowed — 40× the measured worst case, and far too many
+  for the claim they actually pin (a blob-only load / a second reload must not drop or duplicate the
+  scene). Do not "restore" bit equality by raising `NEAR_CLIP_DISABLED`: that reintroduces the front
+  clipping plane the constant exists to remove.
+- **The Rust viewer's far clipping plane follows the scene; C++'s does not.** `load::SceneBounds`
+  (`load.rs`) caches the scene's bounding sphere once per load (`Scene::world_bounds` walks every
+  cluster of every instance and transforms all eight corners — ~125k transforms per frame for
+  `dragon`, so it is *not* recomputed per frame), and `load::update_far_plane` re-derives
+  `far = max(|eye - center| + 1.6 * radius, 16)` from the **current eye** at the top of every
+  `next_frame`, after the input handlers and before `draw`. `view_all()` calls the same
+  `SceneBounds::far_for_eye` at the pose it just placed, so the framing pose and the running camera
+  cannot disagree. Why it matters: `bvhtraversal.wgsl`/`culling.wgsl` reject nodes through
+  `frustumCulling`, so a scene that falls behind a fixed far plane does not render clipped — it
+  renders as **nothing at all**. `bunny` frames with `far 16` while its bounding sphere is r 2.392 at
+  d 5.501, so ~20 wheel notches out of the scene used to blank it. The `16` floor is the same
+  skybox bound C++ has, and it is why the plane does *not* simply track the eye at close range.
+  Tightening rather than ratcheting is deliberate: `far` is also a depth-precision budget (the
+  `NEAR_CLIP_DISABLED` ladder above is linear in `1/near`; the same quantisation argument applies to
+  `far`).
+  **The per-frame update is a no-op at an unmoved pose** (`far != camera.far` gates the projection
+  rebuild), which is why all four Rust goldens stayed bit-comparable: `--capture` never moves the
+  camera. `far_plane_always_encompasses_the_scene_bounds` in `load.rs` pins the property by dollying
+  40 notches out and asserting all eight AABB corners stay inside the frustum, and
+  `update_far_plane_changes_nothing_but_far` pins that fov, near, aspect and pose are untouched.
+  Consequence for *Reset camera*: C++ restores `cameraFar = 256` and keeps it; the Rust viewer
+  restores it and then immediately re-derives it from the reset pose, so its far plane is never the
+  fixed 256.
 
 ## Camera and "View all"
 
@@ -464,7 +563,11 @@ automatic call — there is no `--view-all` flag and none is needed.
 - Near/far are derived from the model (`near = max(0.01, d - 1.1r)`, `far = max(d + 1.6r, 16)`).
   The **floor of 16 on the far plane is load-bearing**: `shaders/glsl/pbrtexture/skybox.vert`
   multiplies by the *camera* projection and `assets/models/cube.gltf` spans ±5 (corner 8.66), so a
-  smaller far plane clips the environment away.
+  smaller far plane clips the environment away. In **C++** both planes are then *fixed* — only
+  `viewAll()`/`resetCamera()` touch them, so walking out of the model pushes it behind the far plane
+  and it disappears entirely (`frustumCulling` in `bvhtraversal.comp`/`culling.comp` rejects the
+  nodes). The Rust viewer re-derives `far` from the eye every frame instead; see the
+  *far clipping plane follows the scene* bullet above.
 - `cameraFov/cameraNear/cameraFar` and `defaultCameraRotation/defaultCameraPosition` are members
   because `viewAll()` overwrites near/far: without them, *Reset camera* would restore the previous
   model's frustum. `viewAllMargin` (1.15) is how much larger than exactly fitting the frustum the
